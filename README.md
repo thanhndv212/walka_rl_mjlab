@@ -74,6 +74,16 @@ IsaacLab workflows stays smooth:
   `step_length_reward`, etc., driven by a custom
   `BipedalManagerBasedRLEnv.gait_phase` property) — that full
   coordination/symmetry/step-length reward set has not been ported.
+- **`Walka-Flat` trained end-to-end on a rented vast.ai RTX 4090** (10001
+  iterations, `num_envs=4096`, ~1h54m, no OOM) — stable walk, low
+  self-collision and fall rates. See `docs/vast_ai_training.md` for the
+  full rented-GPU workflow and `docs/reward_design.md` for what each of the
+  16 active reward terms does and how it shapes the gait.
+
+![Trained Walka-Flat policy: a stable forward walking gait in sim](docs/images/walka_flat_trained.gif)
+
+*The trained policy (checkpoint `bsyn0ch8`/`model_9900.pt`) walking under a
+forward velocity command, played back locally in sim.*
 
 ## Install
 
