@@ -39,11 +39,13 @@ pick:
   sensor (`foot_height_scan`) — real per-step GPU compute beyond the policy
   network itself (still a small MLP, 512×256×128). Treat this closer to
   mjlab's own G1 humanoid example than to a tabletop arm task: an RTX
-  4090/5090 or A5000/A6000 is a reasonable starting tier. This has **not
-  been benchmarked on GPU yet** (all runs so far were CPU-only, 4 envs, tens
-  of steps — see "Known gaps" in the README) — watch the printed `Steps per
-  second` for the first ~30s of the real run (step 5) and adjust
-  `--env.scene.num-envs` from there rather than trusting any number here.
+  4090/5090 or A5000/A6000 is a reasonable starting tier. **Verified**: a
+  full `Walka-Flat` run (10001 iterations, `num_envs=4096`) completed on a
+  rented RTX 4090 (24GB) in ~1h54m, no OOM, no preemption issues — watch the
+  printed `Steps per second` for the first ~30s of the real run (step 5) and
+  adjust `--env.scene.num-envs` from there if your offer's GPU differs.
+  `Walka-Rough` (terrain generator + raycasting) hasn't been run on GPU yet —
+  expect lower throughput per env than `Walka-Flat` at the same `num_envs`.
 - **VRAM**: start around 16–24GB. `Walka-Rough`'s raycast sensor and
   terrain-generator geometry cost more VRAM per env than `Walka-Flat`
   (no terrain mesh, no raycasting) — if you're unsure, do the first real run
@@ -54,7 +56,11 @@ pick:
 - **RAM**: 16–32GB is comfortable.
 - **Image/template**: any template with CUDA 12.8+ and a recent Ubuntu
   (vast.ai's own "PyTorch" template, or `nvidia/cuda:12.8.1-devel-ubuntu22.04`)
-  works — `uv sync --extra cu128` installs torch itself.
+  works — `uv sync --extra cu128` installs torch itself. Bare CUDA *devel*
+  images don't include `libEGL`/`libGL`, which `import mujoco` needs even
+  when nothing is rendering (an unconditional import inside the package) —
+  `setup_remote.sh` now installs `libegl1 libgl1 libglx0 libopengl0`
+  automatically when they're missing, so this is handled either way.
 - **Disk**: 30GB is comfortable (repo + meshes are a few MB; the rest is
   torch/CUDA wheels + checkpoints).
 - **Interruptible vs. on-demand**: interruptible is cheaper but can be
@@ -227,12 +233,27 @@ console) rather than just stopping it.
 - **`wandb: ERROR ... 401`**: the API key wasn't picked up — rerun
   `uv run wandb login` inside the repo's venv (`uv run`, not a bare
   `wandb` on the system Python).
-- **No display / rendering errors on the rented box**: not expected for a
-  plain training run — a render context only opens when `--video` is
-  passed, and `mjlab` defaults `MUJOCO_GL=egl` on Linux for that case.
+- **`AttributeError: 'NoneType' object has no attribute 'eglQueryString'`
+  (or any `libEGL`/`libGL` import error) right at startup**, before
+  training even gets to argument parsing — a bare CUDA *devel* image is
+  missing `libegl1`/`libgl1`, which `import mujoco` needs unconditionally
+  (regardless of `--video`). `setup_remote.sh` installs these
+  automatically now; if you ran it from an older checkout, `apt-get
+  install -y libegl1 libgl1 libglx0 libopengl0` and retry. **This crashes
+  before `wandb.init()` runs** — if a training run "did nothing" and never
+  showed up in W&B, check this first (`tail` the tmux pane/log), not W&B
+  auth.
 - **`push_to_hub.py` fails with a 401/permission error**: not logged in (or
   the token lacks write access) on the machine running it — rerun
   `uv run hf auth login` there.
 - **`vastai` CLI reports insufficient balance / instance won't launch**:
   check `vastai show user` — a negative or zero balance blocks new rentals
   even if an offer shows as available; top up before renting.
+- **Forgot to destroy the instance after a run**: if you're driving the
+  instance from a controlling machine (not just an interactive SSH
+  session), a small polling loop that stops the instance once GPU
+  utilization and tmux sessions have been idle for N minutes
+  (`nvidia-smi --query-gpu=utilization.gpu`, `tmux list-sessions`, then
+  `vastai stop instance <id>`) is a cheap safety net against paying for
+  idle GPU time after training finishes. Still bills for disk while
+  stopped — `vastai destroy instance <id>` once you're really done.

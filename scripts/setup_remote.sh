@@ -23,6 +23,18 @@ set -euo pipefail
 REPO_URL="https://github.com/thanhndv212/walka_rl_mjlab.git"
 REPO_DIR="walka_rl_mjlab"
 
+# Bare CUDA devel images (e.g. nvidia/cuda:12.8.1-devel-ubuntu22.04) don't
+# include libEGL/libGL — `import mujoco` fails at import time (unconditional
+# renderer import) without them, well before any actual rendering is
+# attempted. Templates that already bundle a desktop/OpenGL stack (vast.ai's
+# "PyTorch" template, etc.) already have these; the install is a harmless
+# no-op there.
+if command -v apt-get &>/dev/null && ! ldconfig -p 2>/dev/null | grep -q libEGL.so; then
+  echo "==> Installing libEGL/libGL (missing on bare CUDA images, needed just to import mujoco)"
+  apt-get update -qq
+  apt-get install -y -qq libegl1 libgl1 libglx0 libopengl0
+fi
+
 if ! command -v uv &>/dev/null; then
   echo "==> Installing uv"
   curl -LsSf https://astral.sh/uv/install.sh | sh
