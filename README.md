@@ -89,7 +89,16 @@ make sync       # GPU box, CUDA 12.8: uv sync --extra cu128 --group dev
 uv run python scripts/list_envs.py
 uv run python scripts/train.py Walka-Flat --env.scene.num-envs=4096
 uv run python scripts/play.py Walka-Flat --checkpoint-file logs/rsl_rl/walka_velocity/DATE/model_1000.pt
+uv run python scripts/push_to_hub.py --repo-id <user>/walka-velocity-flat --wandb-run-path <entity>/<project>/<run_id>
 ```
+
+No local GPU needed: train on a rented GPU box (tracked live via W&B, the
+default logger), play the checkpoint back in sim on any machine, then
+publish a promoted checkpoint (ONNX + config + model card) to the Hugging
+Face Hub — see `docs/vast_ai_training.md` for the full walkthrough
+(instance selection, cost, monitoring, retrieving the checkpoint, the
+promotion bar to clear before publishing). Repo:
+<https://github.com/thanhndv212/walka_rl_mjlab>.
 
 ## Viewing the robot
 

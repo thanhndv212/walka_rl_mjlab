@@ -18,6 +18,7 @@ dependencies = [
     # of existing checkpoints. Mirrors soarm_mjlab's pinning rationale.
     "mjlab==1.5.3",
     "mujoco-warp==3.10.0.3",
+    "huggingface_hub>=0.24.0",
     "prettytable>=3.0",
     "tyro>=0.9",
     "wandb>=0.17",
