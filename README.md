@@ -41,6 +41,14 @@ IsaacLab workflows stays smooth:
   no simplified collision hulls exist yet, which is fine for getting an env
   running but expensive/less robust for real training. The IMU site has no
   known real mounting offset (placed at the pelvis origin).
+- **3 body pairs need `<contact><exclude>`**: `abdomen`/`pelvis`,
+  `pelvis`/`pelvisL`, `pelvis`/`pelvisR` structurally overlap at every joint
+  angle (found by sweeping all 26 joints through their full range — see
+  `STRUCTURAL_OVERLAP_PAIRS` in `tools/convert_urdf_to_mjcf.py`), same as
+  `g1.xml`'s own short exclude list. Already excluded in the generated
+  `walka.xml`; re-sweep if the mesh export changes. Other body pairs only
+  touch near a joint's extreme (e.g. a leg crossing into the other leg) —
+  that's genuine self-collision, left alone on purpose.
 - **Gait-phase reward system**: the actual tuned jackbot task
   (`JackbotRoughEnvCfg`/`JackbotFlatEnvCfg` in walka_lab, registered as
   `Isaac-Velocity-Rough/Flat-Jackbot-v0`) uses a bespoke clock-based biped

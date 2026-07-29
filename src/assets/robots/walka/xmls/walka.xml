@@ -150,4 +150,9 @@
     <accelerometer name="imu_lin_acc" site="imu_in_pelvis" />
     <subtreeangmom name="root_angmom" body="pelvis" />
   </sensor>
+  <contact>
+    <exclude body1="abdomen" body2="pelvis" />
+    <exclude body1="pelvis" body2="pelvisL" />
+    <exclude body1="pelvis" body2="pelvisR" />
+  </contact>
 </mujoco>

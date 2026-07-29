@@ -26,6 +26,18 @@ concept of but mjlab's built-in velocity task requires:
     subtreeangmom sensor (mdp.builtin_sensor / the angular_momentum
     reward read these directly off the compiled MuJoCo model, matching
     mjlab's own g1.xml convention exactly)
+  - <contact><exclude> pairs for body pairs whose meshes structurally
+    overlap at every joint value, not just at the extremes of motion (found
+    by sweeping each joint through its full range with everything else at
+    the resting pose and recording which body pairs generate a contact —
+    see the exclude list below). Left unexcluded, these fight the contact
+    solver every single step and blow up joint velocities; this is the same
+    thing g1.xml's own (much shorter) <contact><exclude> list handles for
+    its two elbow/wrist and two pelvis/hip pairs. Pairs that only touch near
+    a joint's extreme (e.g. a leg swinging into the other leg, or a hip
+    folding all the way back into the torso) are left alone — that is
+    physically real self-collision the sim and the self-collision reward
+    are supposed to see, not a mesh artifact.
 
 Verified against a live env: both Walka-Rough and Walka-Flat build, reset,
 and step (100 steps of random small actions, no NaNs) with the output of
@@ -43,6 +55,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 XML_DIR = REPO_ROOT / "src" / "assets" / "robots" / "walka" / "xmls"
 ASSETS_DIR = XML_DIR / "assets"
 DST = XML_DIR / "walka.xml"
+
+# Found by sweeping each of the 26 joints through its full range (9 samples)
+# with everything else held at the resting pose and recording which body
+# pairs generate a contact at *every* sample — i.e. pairs whose meshes touch
+# regardless of joint angle, not just at an extreme. See module docstring.
+STRUCTURAL_OVERLAP_PAIRS = [
+    ("abdomen", "pelvis"),
+    ("pelvis", "pelvisL"),
+    ("pelvis", "pelvisR"),
+]
 
 
 def convert(urdf_dir: Path) -> None:
@@ -122,6 +144,12 @@ def convert(urdf_dir: Path) -> None:
     ET.SubElement(sensor, "velocimeter", name="imu_lin_vel", site="imu_in_pelvis")
     ET.SubElement(sensor, "accelerometer", name="imu_lin_acc", site="imu_in_pelvis")
     ET.SubElement(sensor, "subtreeangmom", name="root_angmom", body="pelvis")
+
+    # Structural mesh overlaps at the joint socket (see module docstring),
+    # found by sweeping every joint's full range from the resting pose.
+    contact = ET.SubElement(root, "contact")
+    for body1, body2 in STRUCTURAL_OVERLAP_PAIRS:
+        ET.SubElement(contact, "exclude", body1=body1, body2=body2)
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")
