@@ -4,7 +4,9 @@ from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.event_manager import EventTermCfg
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
+from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import (
     ContactMatch,
     ContactSensorCfg,
@@ -13,11 +15,11 @@ from mjlab.sensor import (
     RingPatternCfg,
     TerrainHeightSensorCfg,
 )
-from mjlab.tasks.velocity import mdp
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.tasks.velocity.velocity_env_cfg import make_velocity_env_cfg
 
 from src.assets.robots import WALKA_ACTION_SCALE, get_walka_robot_cfg
+from src.tasks.velocity import mdp
 
 
 def walka_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
@@ -151,6 +153,44 @@ def walka_rough_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         func=mdp.self_collision_cost,
         weight=-1.0,
         params={"sensor_name": self_collision_cfg.name, "force_threshold": 10.0},
+    )
+
+    # Gait-clock phase observation + matching reward terms, ported from
+    # unitree_rl_mjlab (src/tasks/velocity/mdp): stock mjlab's template has
+    # no gait-phase concept at all, which the README's "Known gaps" section
+    # flagged relative to walka_lab's bespoke IsaacLab gait reward system.
+    # feet_gait is a lighter stand-in (fixed sin-clock schedule of which
+    # foot should be in stance vs. swing, rewarded against measured contact)
+    # rather than a port of walka_lab's full clock/coordination/symmetry
+    # reward set. offset=[0.0, 0.5] assumes feet_ground_contact's primary
+    # match order is (footL, footR) per its pattern above, i.e. the two feet
+    # alternate stance/swing half a cycle apart.
+    gait_period = 0.6
+    for group in ("actor", "critic"):
+        cfg.observations[group].terms["phase"] = ObservationTermCfg(
+            func=mdp.phase,
+            params={"period": gait_period, "command_name": "twist"},
+        )
+    cfg.rewards["foot_gait"] = RewardTermCfg(
+        func=mdp.feet_gait,
+        weight=0.5,
+        params={
+            "period": gait_period,
+            "offset": [0.0, 0.5],
+            "threshold": 0.56,
+            "command_threshold": 0.1,
+            "command_name": "twist",
+            "sensor_name": "feet_ground_contact",
+        },
+    )
+    cfg.rewards["stand_still"] = RewardTermCfg(
+        func=mdp.stand_still,
+        weight=-1.0,
+        params={
+            "command_name": "twist",
+            "command_threshold": 0.1,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+        },
     )
 
     if play:

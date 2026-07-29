@@ -38,6 +38,10 @@ IsaacLab workflows stays smooth:
   same contact-sweep + dynamic-stability methodology used for the rest of
   this asset; `yaw_hip`'s own placement (mid-thigh, not at the hip) and its
   L/R range asymmetry are unchanged, still open.
+- **Gait-clock reward migrated from `unitree_rl_mjlab`** (`src/tasks/velocity/mdp/`):
+  `phase` observation + `feet_gait`/`stand_still` rewards, wired into
+  `env_cfgs.py` alongside stock mjlab's velocity template. See "Known gaps"
+  below for what this is (and isn't) relative to walka_lab's own gait reward.
 
 ### Known gaps
 
@@ -57,16 +61,19 @@ IsaacLab workflows stays smooth:
   `walka.xml`; re-sweep if the mesh export or body structure changes. Other
   body pairs only touch near a joint's extreme (e.g. a leg crossing into
   the other leg) — that's genuine self-collision, left alone on purpose.
-- **Gait-phase reward system**: the actual tuned jackbot task
-  (`JackbotRoughEnvCfg`/`JackbotFlatEnvCfg` in walka_lab, registered as
-  `Isaac-Velocity-Rough/Flat-Jackbot-v0`) uses a bespoke clock-based biped
-  gait reward (`feet_clock_frc`, `feet_clock_vel`, `leg_coordination_reward`,
-  `gait_symmetry_reward`, `step_length_reward`, etc., all driven by a custom
-  `BipedalManagerBasedRLEnv.gait_phase` sine-wave stance/swing property).
-  None of this exists here yet — `env_cfgs.py` uses mjlab's generic built-in
-  velocity template (`variable_posture`, `upright`, `feet_clearance`, ...)
-  instead, which is a materially different reward design, not just a
-  physics-backend retune.
+- **Gait-phase reward system, partial**: a `phase` observation (sin/cos
+  gait clock, zeroed while standing) and a `feet_gait` reward (fixed
+  stance/swing schedule checked against measured foot contact) plus a
+  `stand_still` penalty are now wired in (`src/tasks/velocity/mdp/`,
+  ported from `unitree_rl_mjlab`'s local task fork — not present in
+  stock mjlab). This is a much lighter mechanism than the actual tuned
+  jackbot task in walka_lab (`JackbotRoughEnvCfg`/`JackbotFlatEnvCfg`,
+  registered as `Isaac-Velocity-Rough/Flat-Jackbot-v0`), which uses a
+  bespoke clock-based biped gait reward (`feet_clock_frc`,
+  `feet_clock_vel`, `leg_coordination_reward`, `gait_symmetry_reward`,
+  `step_length_reward`, etc., driven by a custom
+  `BipedalManagerBasedRLEnv.gait_phase` property) — that full
+  coordination/symmetry/step-length reward set has not been ported.
 
 ## Install
 
