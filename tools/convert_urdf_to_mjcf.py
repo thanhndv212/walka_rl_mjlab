@@ -38,6 +38,16 @@ concept of but mjlab's built-in velocity task requires:
     folding all the way back into the torso) are left alone — that is
     physically real self-collision the sim and the self-collision reward
     are supposed to see, not a mesh artifact.
+  - yaw_knee removed and kneeL/kneeR fully merged with tibiaL/tibiaR into
+    one body each (Option B from docs/kinematic_structure_analysis.md):
+    yaw_knee is a second twist DOF in series with yaw_hip (both rotate
+    about the same vertical axis, separated only by the knee pitch hinge —
+    kinematically near-redundant for a walking gait) and already atypical
+    for a bipedal knee to begin with (G1/H1/Cassie/Digit-class robots model
+    the knee as pitch-only). DOF count: 26 -> 24. See fuse_knee_into_shin.
+    A prior attempt at fixing this rebuilt the whole robot from scratch
+    with MuJoCo primitives instead of patching this asset — abandoned; not
+    worth the mesh/visual fidelity given up for it.
 
 Verified against a live env: both Walka-Rough and Walka-Flat build, reset,
 and step (100 steps of random small actions, no NaNs) with the output of
@@ -65,6 +75,49 @@ STRUCTURAL_OVERLAP_PAIRS = [
     ("pelvis", "pelvisL"),
     ("pelvis", "pelvisR"),
 ]
+
+
+def _parse_pos(pos_str: str) -> list[float]:
+    return [float(x) for x in pos_str.split()]
+
+
+def _format_pos(vec: list[float]) -> str:
+    return " ".join(str(x) for x in vec)
+
+
+def fuse_knee_into_shin(pelvis_body: ET.Element, side: str) -> None:
+    """Option B from docs/kinematic_structure_analysis.md: drop yaw_knee
+    and fully merge tibia<side> into knee<side> as one body, instead of
+    just deleting the joint and leaving two separately-tracked but rigidly
+    welded bodies (that would be closer to Option A). MuJoCo recomputes
+    combined mass/inertia automatically once both meshes are geoms on the
+    same body.
+
+    tibia<side>'s local pos is a pure translation from knee<side> (its
+    joint's own `pos` is "0 0 0" in the source URDF, i.e. no additional
+    offset, and neither body has a rotation relative to its parent besides
+    the now-removed joint) — so folding it in is just adding tibia's
+    offset onto its geom and children, no rotation bookkeeping needed.
+    """
+    knee = pelvis_body.find(f".//body[@name='knee{side}']")
+    tibia = knee.find(f"body[@name='tibia{side}']")
+    tibia_pos = _parse_pos(tibia.get("pos", "0 0 0"))
+
+    yaw_joint = tibia.find(f"joint[@name='{side}_yaw_knee_joint']")
+    tibia.remove(yaw_joint)
+
+    for geom in list(tibia.findall("geom")):
+        tibia.remove(geom)
+        local_pos = _parse_pos(geom.get("pos", "0 0 0"))
+        geom.set("pos", _format_pos([a + b for a, b in zip(tibia_pos, local_pos)]))
+        knee.append(geom)
+    for child in list(tibia.findall("body")):
+        tibia.remove(child)
+        local_pos = _parse_pos(child.get("pos", "0 0 0"))
+        child.set("pos", _format_pos([a + b for a, b in zip(tibia_pos, local_pos)]))
+        knee.append(child)
+
+    knee.remove(tibia)
 
 
 def convert(urdf_dir: Path) -> None:
@@ -105,6 +158,14 @@ def convert(urdf_dir: Path) -> None:
     ET.SubElement(pelvis_body, "freejoint", name="floating_base_joint")
     for child in old_children:
         pelvis_body.append(child)
+
+    # Drop yaw_knee, merging tibiaL/tibiaR into kneeL/kneeR (Option B —
+    # see fuse_knee_into_shin). Before the geom-naming pass below, so the
+    # moved tibia geom gets renamed under "knee<side>" like any other geom
+    # on that body (same convention already used for thorax absorbing the
+    # head geom).
+    for side in ("L", "R"):
+        fuse_knee_into_shin(pelvis_body, side)
 
     # Name every geom "<body>_collision" so CollisionCfg's
     # geom_names_expr=(".*collision.*",) in walka_constants.py matches them

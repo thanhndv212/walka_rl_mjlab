@@ -50,6 +50,12 @@ WALKA_HIP_ACTUATOR = BuiltinPositionActuatorCfg(
     armature=0.02,
 )
 
+# Only matches pitch_knee: yaw_knee was removed (Option B, see
+# docs/kinematic_structure_analysis.md — a second twist DOF in series with
+# yaw_hip, kinematically near-redundant for a walking gait and already
+# atypical for a bipedal knee). tools/convert_urdf_to_mjcf.py merges
+# tibia<side> into knee<side> at generation time, so this regex naturally
+# stops matching anything but pitch_knee once that runs.
 WALKA_KNEE_ACTUATOR = BuiltinPositionActuatorCfg(
     target_names_expr=(".*_knee_joint",),
     stiffness=100.0,

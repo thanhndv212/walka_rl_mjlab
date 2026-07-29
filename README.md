@@ -30,6 +30,14 @@ IsaacLab workflows stays smooth:
     now that they exist; `pose` reward per-joint stds filled in (walka's own
     joint-name convention, tuning rationale ported from the g1 example —
     a starting point, not numbers validated on walka specifically).
+- **Kinematic fix applied** (`docs/kinematic_structure_analysis.md`):
+  `yaw_knee` removed and `tibiaL`/`tibiaR` fully merged into `kneeL`/`kneeR`
+  (`fuse_knee_into_shin` in `tools/convert_urdf_to_mjcf.py`) — it was a
+  redundant second twist DOF in series with `yaw_hip`, and already atypical
+  for a bipedal knee to begin with. **26 → 24 DOF.** Re-verified with the
+  same contact-sweep + dynamic-stability methodology used for the rest of
+  this asset; `yaw_hip`'s own placement (mid-thigh, not at the hip) and its
+  L/R range asymmetry are unchanged, still open.
 
 ### Known gaps
 
@@ -43,12 +51,12 @@ IsaacLab workflows stays smooth:
   known real mounting offset (placed at the pelvis origin).
 - **3 body pairs need `<contact><exclude>`**: `abdomen`/`pelvis`,
   `pelvis`/`pelvisL`, `pelvis`/`pelvisR` structurally overlap at every joint
-  angle (found by sweeping all 26 joints through their full range — see
+  angle (found by sweeping all 24 joints through their full range — see
   `STRUCTURAL_OVERLAP_PAIRS` in `tools/convert_urdf_to_mjcf.py`), same as
   `g1.xml`'s own short exclude list. Already excluded in the generated
-  `walka.xml`; re-sweep if the mesh export changes. Other body pairs only
-  touch near a joint's extreme (e.g. a leg crossing into the other leg) —
-  that's genuine self-collision, left alone on purpose.
+  `walka.xml`; re-sweep if the mesh export or body structure changes. Other
+  body pairs only touch near a joint's extreme (e.g. a leg crossing into
+  the other leg) — that's genuine self-collision, left alone on purpose.
 - **Gait-phase reward system**: the actual tuned jackbot task
   (`JackbotRoughEnvCfg`/`JackbotFlatEnvCfg` in walka_lab, registered as
   `Isaac-Velocity-Rough/Flat-Jackbot-v0`) uses a bespoke clock-based biped
@@ -74,6 +82,28 @@ make sync       # GPU box, CUDA 12.8: uv sync --extra cu128 --group dev
 uv run python scripts/list_envs.py
 uv run python scripts/train.py Walka-Flat --env.scene.num-envs=4096
 uv run python scripts/play.py Walka-Flat --checkpoint-file logs/rsl_rl/walka_velocity/DATE/model_1000.pt
+```
+
+## Viewing the robot
+
+Three ways to look at Walka in MuJoCo, depending on what you want to see:
+
+```bash
+# Full environment: robot standing on terrain, held up by the real position
+# actuators via a zero-action policy. `mjpython`, not plain `python`, is
+# required for launch_passive on macOS.
+.venv/bin/mjpython scripts/play.py Walka-Flat --agent=zero --viewer=native
+
+# Raw model geometry only: no actuators, falls under gravity immediately.
+# Quick structural look, no mjpython needed.
+uv run python -m mujoco.viewer --mjcf=src/assets/robots/walka/xmls/walka.xml
+
+# Pelvis welded to the world + one position-actuator slider per joint (via
+# the viewer's Control panel) — inspect joint ranges/motion without the
+# robot needing to balance. Collision stays on for everything except the
+# structural-overlap pairs walka.xml already excludes, so leg-into-leg
+# self-collision at extreme angles is still visible.
+uv run python tools/view_fixed_base.py
 ```
 
 ## Regenerating the MJCF
