@@ -1,0 +1,153 @@
+<mujoco model="walka">
+  <compiler angle="radian" meshdir="assets" />
+  <asset>
+    <mesh name="Circle_007" file="Circle_007.obj" />
+    <mesh name="Circle_023" file="Circle_023.obj" />
+    <mesh name="Circle_029" file="Circle_029.obj" />
+    <mesh name="Circle_031" file="Circle_031.obj" />
+    <mesh name="Circle_016" file="Circle_016.obj" />
+    <mesh name="Circle_032" file="Circle_032.obj" />
+    <mesh name="Circle_017" file="Circle_017.obj" />
+    <mesh name="Cube_001" file="Cube_001.obj" />
+    <mesh name="Cube_004" file="Cube_004.obj" />
+    <mesh name="Circle_033" file="Circle_033.obj" />
+    <mesh name="Circle_019" file="Circle_019.obj" />
+    <mesh name="Cube_002" file="Cube_002.obj" />
+    <mesh name="Cube_026" file="Cube_026.obj" />
+    <mesh name="Cube_008" file="Cube_008.obj" />
+    <mesh name="Circle_025" file="Circle_025.obj" />
+    <mesh name="Circle_030" file="Circle_030.obj" />
+    <mesh name="Circle_026" file="Circle_026.obj" />
+    <mesh name="Circle_001" file="Circle_001.obj" />
+    <mesh name="Circle_005" file="Circle_005.obj" />
+    <mesh name="Circle_028" file="Circle_028.obj" />
+    <mesh name="Circle_004" file="Circle_004.obj" />
+    <mesh name="Circle_034" file="Circle_034.obj" />
+    <mesh name="Circle_021" file="Circle_021.obj" />
+    <mesh name="Circle_010" file="Circle_010.obj" />
+    <mesh name="Circle_024" file="Circle_024.obj" />
+    <mesh name="Circle_055" file="Circle_055.obj" />
+    <mesh name="Circle_027" file="Circle_027.obj" />
+    <mesh name="Circle_003" file="Circle_003.obj" />
+  </asset>
+  <worldbody>
+    <body name="pelvis" pos="0 0 0.832">
+      <freejoint name="floating_base_joint" />
+      <geom type="mesh" mesh="Circle_005" name="pelvis_collision" />
+      <body name="pelvisL" pos="0 0.138 1e-07">
+        <joint name="L_pitch_hip_joint" pos="0 0 0" axis="0 1 0" range="-3.14159 0" />
+        <geom type="mesh" mesh="Circle_028" name="pelvisL_collision" />
+        <body name="upperFemurL">
+          <joint name="L_roll_hip_joint" pos="0 0 0" axis="1 0 0" range="-0.523599 1.5708" />
+          <geom type="mesh" mesh="Circle_027" name="upperFemurL_collision" />
+          <body name="lowerFemurL" pos="0 0 -0.415">
+            <joint name="L_yaw_hip_joint" pos="0 0 0" axis="0 0 1" range="0 3.14159" />
+            <geom type="mesh" mesh="Circle_026" name="lowerFemurL_collision" />
+            <body name="kneeL" pos="0 0 -3e-07">
+              <joint name="L_pitch_knee_joint" pos="0 0 0" axis="0 1 0" range="-0.174533 1.74533" />
+              <geom type="mesh" mesh="Circle_025" name="kneeL_collision" />
+              <body name="tibiaL" pos="0 0 -0.248">
+                <joint name="L_yaw_knee_joint" pos="0 0 0" axis="0 0 1" range="0 3.14159" />
+                <geom type="mesh" mesh="Circle_024" name="tibiaL_collision" />
+                <body name="ankleL" pos="0 0 -1e-07">
+                  <joint name="L_pitch_ankle_joint" pos="0 0 0" axis="0 1 0" range="-1.0472 1.0472" />
+                  <geom type="mesh" mesh="Circle_023" name="ankleL_collision" />
+                  <body name="footL" pos="0 0 -0.0809999">
+                    <joint name="L_roll_ankle_joint" pos="0 0 0" axis="1 0 0" range="-0.523599 0.523599" />
+                    <geom type="mesh" mesh="Cube_001" name="footL_collision" />
+                    <site name="footL" pos="0.05 0 -0.099" />
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="pelvisR" pos="0 -0.138 1e-07">
+        <joint name="R_pitch_hip_joint" pos="0 0 0" axis="0 1 0" range="-3.14159 0" />
+        <geom type="mesh" mesh="Circle_004" name="pelvisR_collision" />
+        <body name="upperFemurR">
+          <joint name="R_roll_hip_joint" pos="0 0 0" axis="1 0 0" range="-1.5708 0.523599" />
+          <geom type="mesh" mesh="Circle_003" name="upperFemurR_collision" />
+          <body name="lowerFemurR" pos="0 0 -0.415">
+            <joint name="R_yaw_hip_joint" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" />
+            <geom type="mesh" mesh="Circle_001" name="lowerFemurR_collision" />
+            <body name="kneeR" pos="0 0 -3e-07">
+              <joint name="R_pitch_knee_joint" pos="0 0 0" axis="0 1 0" range="-0.174533 1.74533" />
+              <geom type="mesh" mesh="Circle_030" name="kneeR_collision" />
+              <body name="tibiaR" pos="0 0 -0.248">
+                <joint name="R_yaw_knee_joint" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" />
+                <geom type="mesh" mesh="Circle_055" name="tibiaR_collision" />
+                <body name="ankleR" pos="0 0 -1e-07">
+                  <joint name="R_pitch_ankle_joint" pos="0 0 0" axis="0 1 0" range="-1.0472 1.0472" />
+                  <geom type="mesh" mesh="Circle_029" name="ankleR_collision" />
+                  <body name="footR" pos="0 0 -0.0809999">
+                    <joint name="R_roll_ankle_joint" pos="0 0 0" axis="1 0 0" range="-0.523599 0.523599" />
+                    <geom type="mesh" mesh="Cube_004" name="footR_collision" />
+                    <site name="footR" pos="0.05 0 -0.099" />
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <body name="abdomen" pos="0 0 0.205">
+        <joint name="pitch_waist_joint" pos="0 0 0" axis="0 1 0" range="-1.5708 1.5708" />
+        <geom type="mesh" mesh="Circle_007" name="abdomen_collision" />
+        <body name="thorax" pos="0 0 0.123">
+          <joint name="yaw_waist_joint" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+          <geom type="mesh" mesh="Circle_010" name="thorax_collision" />
+          <geom type="mesh" mesh="Cube_008" name="thorax_collision_1" />
+          <body name="shoulderL" pos="0 0.2155 0.155">
+            <joint name="L_pitch_shoulder_joint" pos="0 0 0" axis="0 1 0" range="-3.14159 3.14159" />
+            <geom type="mesh" mesh="Circle_034" name="shoulderL_collision" />
+            <body name="armL" pos="0 0 -1e-07">
+              <joint name="L_roll_shoulder_joint" pos="0 0 0" axis="1 0 0" range="0 3.14159" />
+              <geom type="mesh" mesh="Circle_031" name="armL_collision" />
+              <body name="elbowL" pos="0 0 -0.248">
+                <joint name="L_yaw_shoulder_joint" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+                <geom type="mesh" mesh="Circle_032" name="elbowL_collision" />
+                <body name="forearmL">
+                  <joint name="L_pitch_elbow_joint" pos="0 0 0" axis="0 1 0" range="-2.0944 2.0944" />
+                  <geom type="mesh" mesh="Circle_033" name="forearmL_collision" />
+                  <body name="handL" pos="-2e-07 0 -0.105">
+                    <joint name="L_yaw_wrist_joint" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+                    <geom type="mesh" mesh="Cube_002" name="handL_collision" />
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+          <body name="shoulderR" pos="0 -0.2155 0.155">
+            <joint name="R_pitch_shoulder_joint" pos="0 0 0" axis="0 1 0" range="-3.14159 3.14159" />
+            <geom type="mesh" mesh="Circle_021" name="shoulderR_collision" />
+            <body name="armR" pos="0 0 -2e-07">
+              <joint name="R_roll_shoulder_joint" pos="0 0 0" axis="1 0 0" range="-3.14159 0" />
+              <geom type="mesh" mesh="Circle_016" name="armR_collision" />
+              <body name="elbowR" pos="0 0 -0.248">
+                <joint name="R_yaw_shoulder_joint" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+                <geom type="mesh" mesh="Circle_017" name="elbowR_collision" />
+                <body name="forearmR">
+                  <joint name="R_pitch_elbow_joint" pos="0 0 0" axis="0 1 0" range="-2.0944 2.0944" />
+                  <geom type="mesh" mesh="Circle_019" name="forearmR_collision" />
+                  <body name="handR" pos="-2e-07 0 -0.105">
+                    <joint name="R_yaw_wrist_joint" pos="0 0 0" axis="0 0 1" range="-3.14159 3.14159" />
+                    <geom type="mesh" mesh="Cube_026" name="handR_collision" />
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+      <site name="imu_in_pelvis" size="0.01" pos="0 0 0" />
+    </body>
+  </worldbody>
+  <sensor>
+    <gyro name="imu_ang_vel" site="imu_in_pelvis" />
+    <velocimeter name="imu_lin_vel" site="imu_in_pelvis" />
+    <accelerometer name="imu_lin_acc" site="imu_in_pelvis" />
+    <subtreeangmom name="root_angmom" body="pelvis" />
+  </sensor>
+</mujoco>

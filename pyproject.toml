@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "walka_rl_mjlab"
+version = "0.1.0"
+description = "RL training of the Walka biped in MuJoCo via mjlab, migrated from the IsaacLab-based walka_lab project"
+readme = "README.md"
+authors = [
+    { name = "Thanh Nguyen" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    # Hard-pinned, not >=: both are fast-moving research libraries, and an
+    # unpinned upgrade silently changing physics/API breaks reproducibility
+    # of existing checkpoints. Mirrors soarm_mjlab's pinning rationale.
+    "mjlab==1.5.3",
+    "mujoco-warp==3.10.0.3",
+    "prettytable>=3.0",
+    "tyro>=0.9",
+    "wandb>=0.17",
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+keywords = ["walka", "mjlab", "mujoco", "reinforcement-learning", "robotics", "humanoid", "biped"]
+
+[project.optional-dependencies]
+# mjlab itself gates torch behind these same two extra names (see its
+# pyproject.toml) — forwarding them here so picking a variant once, at the
+# walka_rl_mjlab level, propagates through. `torch` is listed explicitly (not
+# just pulled transitively via mjlab[...]) because uv requires the package
+# named in [tool.uv.sources]'s extra= to appear directly in that extra's
+# dependency list. Mutually exclusive: see [tool.uv.conflicts] below.
+cpu = ["mjlab[cpu]==1.5.3", "torch>=2.7.0"]
+cu128 = ["mjlab[cu128]==1.5.3", "torch>=2.7.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.uv]
+conflicts = [
+    [{ extra = "cpu" }, { extra = "cu128" }],
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+# Mirrors mjlab's own torch routing (its [tool.uv.sources] doesn't propagate
+# to consumers — it's root-project-only config in uv, so it's re-declared
+# here, gated on our own cpu/cu128 extras instead of mjlab's). No-op on
+# macOS (darwin has one torch wheel, no CPU/CUDA choice to make).
+torch = [
+    { index = "pytorch-cu128", extra = "cu128", marker = "sys_platform != 'darwin'" },
+    { index = "pytorch-cpu", extra = "cpu", marker = "sys_platform != 'darwin'" },
+]
