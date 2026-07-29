@@ -63,3 +63,10 @@ docstring for what it adds beyond a literal URDF import.
 - `docs/kinematic_structure_analysis.md` — MJCF kinematic issues found and fixed.
 
 Repo: <https://github.com/thanhndv212/walka_rl_mjlab>
+
+## Acknowledgements
+
+- [unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab) —
+  this repo's task/script structure mirrors it, and the gait-clock `phase`
+  observation and `feet_gait`/`stand_still` rewards
+  (`src/tasks/velocity/mdp/`) are ported from its local velocity-task fork.
