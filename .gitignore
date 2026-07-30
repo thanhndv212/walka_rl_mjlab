@@ -6,6 +6,9 @@ __pycache__/
 dist/
 build/
 
+# Personal Claude Code settings, not shared with the team.
+.claude/settings.local.json
+
 # RL training artifacts — reproducible from a (task_id, checkpoint, git commit)
 # triple; not source, shouldn't be committed.
 logs/
