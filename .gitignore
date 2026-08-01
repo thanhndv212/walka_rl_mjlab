@@ -16,3 +16,4 @@ wandb/
 outputs/
 *.onnx
 *.pt
+.slim/deepwork/
