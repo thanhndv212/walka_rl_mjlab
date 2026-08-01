@@ -228,12 +228,26 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
             },
         ),
-        # Must run after reset_base/reset_robot_joints (dict order = apply
-        # order within "reset" mode): the full roll/pitch range combined with
-        # a pelvis height tuned for lying-flat poses lets near-upright
-        # samples spawn with legs driven deep into the ground plane, which
-        # MuJoCo's contact solver then resolves as an explosive launch
-        # instead of a real get-up trajectory. See mdp/events.py.
+        # Must run after reset_base/reset_robot_joints: overwrites a
+        # curriculum-annealed fraction of resets to a near-standing pose so
+        # the policy keeps experiencing (and values) actually reaching
+        # standing height, instead of the "kneeling trap" local optimum a
+        # 100%-fallen distribution converges to (see mdp/events.py).
+        "reset_to_standing_curriculum": EventTermCfg(
+            func=mdp.reset_to_standing_curriculum,
+            mode="reset",
+            params={
+                "start_prob": 0.5,
+                "end_prob": 0.05,
+                "anneal_steps": 150_000,
+                "joint_noise": 0.05,
+            },
+        ),
+        # Must run last: the full roll/pitch range combined with a pelvis
+        # height tuned for lying-flat poses lets near-upright samples spawn
+        # with legs driven deep into the ground plane, which MuJoCo's
+        # contact solver then resolves as an explosive launch instead of a
+        # real get-up trajectory. See mdp/events.py.
         "ensure_ground_clearance": EventTermCfg(
             func=mdp.ensure_ground_clearance,
             mode="reset",
