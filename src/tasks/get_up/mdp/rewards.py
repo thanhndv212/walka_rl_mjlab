@@ -21,11 +21,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+from mjlab.managers.manager_base import ManagerTermBase
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
+    from mjlab.managers.reward_manager import RewardTermCfg
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -114,3 +116,114 @@ def stand_still_pose(
     h = asset.data.root_link_pos_w[:, 2]
     scale = torch.exp(-torch.square(h - target_height) / std**2)
     return penalty * scale
+
+
+class height_progress(ManagerTermBase):
+    """Dense reward for upward pelvis-height motion since the previous step.
+
+    HumanUP's r_Δheight term (see docs/get_up_task.md, "Implementation and
+    validation roadmap" Step 1). base_height_exp's narrow Gaussian around
+    target_height gives near-zero gradient anywhere far from standing --
+    exactly the condition the "kneeling trap" exploited, since a policy that
+    never experiences useful gradient toward standing has no reason to try.
+    This term pays for making upward progress from wherever the robot
+    currently is, dense across the whole height range. clamp(min=0.0) pays
+    only for rising -- a controlled descent shouldn't be penalized here (that
+    is termination's job), but it shouldn't be paid for either.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(env)
+        del cfg
+        self._prev_h = torch.zeros(env.num_envs, device=env.device)
+        self._has_prev = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        self._has_prev[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        # Deliberately not seeded from root_link_pos_w in reset(): RewardManager
+        # .reset() runs inside _reset_idx() before this env's own sim.forward()
+        # call (in env.reset()/step()) refreshes kinematics from the
+        # just-applied reset events. Relying on some other event (e.g.
+        # ensure_ground_clearance, which happens to call forward() itself) to
+        # have already refreshed it first would silently break if that event
+        # were ever reordered or removed. Deferring the baseline capture to
+        # the first real __call__ -- which always runs after the env's own
+        # forward() -- sidesteps the ordering dependency entirely.
+        h = env.scene[asset_cfg.name].data.root_link_pos_w[:, 2]
+        delta = torch.where(
+            self._has_prev, (h - self._prev_h).clamp(min=0.0), torch.zeros_like(h)
+        )
+        self._prev_h = h.clone()
+        self._has_prev = torch.ones_like(self._has_prev)
+        return delta
+
+
+class feet_force_progress(ManagerTermBase):
+    """Dense reward for increasing vertical ground-reaction force at the feet.
+
+    HumanUP's r_Δfeet_contact_forces term, the counterpart to
+    ``height_progress`` -- see docs/get_up_task.md Step 1. Rewards
+    transferring weight onto the feet even before pelvis height itself starts
+    climbing (e.g. rolling from supine onto the feet before pushing up),
+    which is a precursor to standing that base_height_exp gives no credit
+    for. Mirrors height_progress's previous-value/clamp-to-positive pattern,
+    tracking summed vertical foot force instead of height.
+
+    ``feet_ground_contact``'s ``reduce="netforce"`` sensor reports the
+    contact-normal force with the primary (foot) bearing weight on the
+    secondary (terrain) as *negative* z -- confirmed empirically (a
+    standing-curriculum reset settles to force_z of -700 to -1000 per foot,
+    not positive) -- so the sign must be flipped before clamping to a
+    positive "weight-bearing" magnitude. Silently getting this backwards
+    zeroes the term outright (clamp(min=0.0) on the wrong sign always
+    returns 0), which is exactly what a 150-iteration smoke run caught:
+    ``Episode_Reward/feet_force_progress`` stayed at 0.0000 for the entire
+    run before this fix.
+
+    Raw force is in Newtons -- hundreds of N per foot even at rest, versus
+    height_progress's O(0.01-0.05) meters per step, so it's normalized by
+    the robot's total body weight (mass * gravity, read once at init from
+    ``mj_model``) into a dimensionless "fraction of body weight" before
+    diffing. The per-step delta is also clamped to 1.0 (at most one full
+    body-weight-equivalent gained per step): the contact solver produces
+    real multi-body-weight impulse spikes on touchdown (observed up to
+    ~3.4x body weight in a single 20ms step during verification) that are
+    solver noise, not signal, and would otherwise dominate every other
+    reward term on exactly the steps a foot first lands.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(env)
+        del cfg
+        gravity_mag = abs(float(env.sim.mj_model.opt.gravity[2]))
+        total_mass = float(env.sim.mj_model.body_mass.sum())
+        self._body_weight = total_mass * gravity_mag
+        self._prev_force = torch.zeros(env.num_envs, device=env.device)
+        self._has_prev = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        self._has_prev[env_ids] = False
+
+    def __call__(self, env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+        sensor: ContactSensor = env.scene.sensors[sensor_name]
+        assert sensor.data.force is not None
+        force = (-sensor.data.force[..., 2]).clamp(min=0.0).sum(dim=1)
+        force_frac = force / self._body_weight
+        delta = torch.where(
+            self._has_prev,
+            (force_frac - self._prev_force).clamp(min=0.0, max=1.0),
+            torch.zeros_like(force_frac),
+        )
+        self._prev_force = force_frac.clone()
+        self._has_prev = torch.ones_like(self._has_prev)
+        return delta

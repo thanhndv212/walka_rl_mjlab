@@ -295,6 +295,10 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     #   upright — keep pelvis level (weight 1.0)
     #   stand_on_feet — binary success: both feet contact + height (weight 2.5)
     #   body_up — torso upright orientation (weight 0.25)
+    #   height_progress / feet_force_progress — dense HumanUP-style Δ-progress
+    #   reward (docs/get_up_task.md Step 1), added to give gradient far from
+    #   target_height where base_height_exp's narrow Gaussian is ~flat —
+    #   the exact condition the kneeling trap exploited.
     # Conditional style (zeroed during rising, active near standing):
     #   stand_still_pose — penalize joint deviation from default (weight -0.5)
     # Regularization:
@@ -324,6 +328,12 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mdp.body_up_exp,
             weight=0.25,
             params={"asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",))},
+        ),
+        "height_progress": RewardTermCfg(func=mdp.height_progress, weight=2.0),
+        "feet_force_progress": RewardTermCfg(
+            func=mdp.feet_force_progress,
+            weight=1.0,
+            params={"sensor_name": "feet_ground_contact"},
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
