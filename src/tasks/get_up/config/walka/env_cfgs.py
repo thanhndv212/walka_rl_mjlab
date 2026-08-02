@@ -292,19 +292,26 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # --- Rewards ---
     # Task rewards (primary get-up signal):
     #   base_height_exp — reach standing pelvis height (weight 5.0)
-    #   upright — keep pelvis level (weight 1.0)
+    #   upright_gated — keep pelvis level, height-gated (weight 1.0)
     #   stand_on_feet — binary success: both feet contact + height (weight 2.5)
-    #   body_up — torso upright orientation (weight 0.25)
+    #   body_up — torso upright orientation, height-gated (weight 0.25)
     #   height_progress / feet_force_progress — dense HumanUP-style Δ-progress
     #   reward (docs/get_up_task.md Step 1), added to give gradient far from
     #   target_height where base_height_exp's narrow Gaussian is ~flat —
     #   the exact condition the kneeling trap exploited.
+    # STAGE_THRESHOLD gates upright_gated/body_up to h > 0.35m (docs/get_up_task.md
+    # Step 2): the burst-tested Step-1-only run showed the policy farming
+    # upright/body_up near their reward ceiling from a kneeling/low pose
+    # (Episode_Reward/upright ~0.95) while genuine fallen-recovery stayed at
+    # 0% (scripts/eval_fallen_recovery.py) — Step 1's dense progress rewards
+    # alone weren't enough to outweigh that free, height-independent signal.
     # Conditional style (zeroed during rising, active near standing):
     #   stand_still_pose — penalize joint deviation from default (weight -0.5)
     # Regularization:
     #   dof_pos_limits, action_rate_l2, self_collisions, joint_vel, torques
     # Termination penalty:
     #   is_terminated — strong penalty for falling/terminating (weight -500)
+    STAGE_THRESHOLD = 0.35
     cfg.rewards = {
         "base_height": RewardTermCfg(
             func=mdp.base_height_exp,
@@ -312,10 +319,11 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={"target_height": 0.832, "std": 0.1},
         ),
         "upright": RewardTermCfg(
-            func=mdp.upright,
+            func=mdp.upright_gated,
             weight=1.0,
             params={
                 "std": math.sqrt(0.2),
+                "stage_threshold": STAGE_THRESHOLD,
                 "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",)),
             },
         ),
@@ -327,7 +335,10 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "body_up": RewardTermCfg(
             func=mdp.body_up_exp,
             weight=0.25,
-            params={"asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",))},
+            params={
+                "stage_threshold": STAGE_THRESHOLD,
+                "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",)),
+            },
         ),
         "height_progress": RewardTermCfg(func=mdp.height_progress, weight=2.0),
         "feet_force_progress": RewardTermCfg(

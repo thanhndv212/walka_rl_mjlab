@@ -24,6 +24,7 @@ import torch
 from mjlab.managers.manager_base import ManagerTermBase
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
+from mjlab.utils.lab_api.math import quat_apply_inverse
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -73,22 +74,68 @@ def stand_on_feet(
 
 def body_up_exp(
     env: ManagerBasedRlEnv,
+    stage_threshold: float,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward for torso being upright. Clamped projected gravity z.
+    """Reward for torso being upright. Clamped projected gravity z, height-gated.
 
-    Returns clamp(-projected_gravity_b[:, 2], 0, 1): 1.0 when perfectly
-    upright (gravity points straight down in body frame, pg_z=-1), 0.0
-    when sideways or upside down. Smooth, bounded, no hyperparameters.
+    Returns clamp(-projected_gravity_b[:, 2], 0, 1) * (h > stage_threshold):
+    1.0 when perfectly upright (gravity points straight down in body frame,
+    pg_z=-1) AND above stage_threshold, 0.0 when sideways/upside down OR
+    still on the ground. Smooth, bounded above the gate.
 
     This is the orientation complement to base_height_exp — height alone
     doesn't distinguish kneeling from standing (the "kneeling trap"
     pitfall flagged in the research). body_up_exp ensures the torso is
     actually vertical, not just high.
+
+    The stage_threshold gate (docs/get_up_task.md Step 2) closes the
+    "kneeling trap" exploit directly: without it, this term (and
+    ``upright_gated``) pays full reward for a vertical torso regardless of
+    height, which the empirical burst-test run showed a policy can farm
+    indefinitely from a kneeling/low pose (``Episode_Reward/upright`` sat
+    near its 0.95+ ceiling for the whole run while height rewards stayed
+    far below theirs) -- Step 1's dense progress rewards alone weren't
+    enough to outweigh that free, height-independent signal. Pick
+    stage_threshold well below stand_on_feet's target_height (e.g.
+    0.3-0.4m vs. 0.7m) so early genuine progress still gets rewarded; the
+    goal is closing the free-reward exploit, not making the reward sparse.
     """
     asset = env.scene[asset_cfg.name]
     pg = asset.data.projected_gravity_b
-    return torch.clamp(-pg[:, 2], min=0.0, max=1.0)
+    h = asset.data.root_link_pos_w[:, 2]
+    gate = (h > stage_threshold).float()
+    return torch.clamp(-pg[:, 2], min=0.0, max=1.0) * gate
+
+
+def upright_gated(
+    env: ManagerBasedRlEnv,
+    std: float,
+    stage_threshold: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Height-gated re-derivation of mjlab's stock ``upright`` reward.
+
+    ``mjlab.tasks.velocity.mdp.rewards.upright`` is a class-based term
+    (auto-instantiated by RewardManager as ``upright(cfg, env)``, not a
+    plain function) -- it can't be wrapped by calling it like a function,
+    so its core math (projected gravity's xy magnitude -> exp(-xy²/std²))
+    is re-derived here rather than reused, then gated the same way as
+    ``body_up_exp`` above (see that docstring for why the gate exists).
+    """
+    asset = env.scene[asset_cfg.name]
+    if asset_cfg.body_ids:
+        body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+        body_quat_w = body_quat_w.squeeze(1)
+    else:
+        body_quat_w = asset.data.root_link_quat_w
+    gravity_w = asset.data.gravity_vec_w
+    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
+    xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
+    upright = torch.exp(-xy_squared / std**2)
+    h = asset.data.root_link_pos_w[:, 2]
+    gate = (h > stage_threshold).float()
+    return upright * gate
 
 
 def stand_still_pose(
