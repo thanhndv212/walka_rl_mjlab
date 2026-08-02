@@ -73,8 +73,15 @@ cat <<'EOF'
        tmux new -s train
 
   3. Launch training (inside tmux) — start with Walka-Flat to get a
-     steps/sec and stability baseline before the heavier Walka-Rough:
-       uv run python scripts/train.py Walka-Flat --env.scene.num-envs=4096
+     steps/sec and stability baseline before the heavier Walka-Rough.
+     Always repeat --extra cu128 --group dev on every `uv run`, not just
+     this one-time setup: a bare `uv run python ...` re-resolves against
+     the *default* (no-extra) dependency set and silently swaps out the
+     cu128 torch build -- see docs/vast_ai_training.md's Troubleshooting
+     section if you hit `ImportError: libcudnn.so.9: cannot open shared
+     object file`.
+       uv run --extra cu128 --group dev python scripts/train.py \
+           Walka-Flat --env.scene.num-envs=4096
 
   4. Detach with Ctrl-b d; reattach later with: tmux attach -t train
 

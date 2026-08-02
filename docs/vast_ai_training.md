@@ -125,8 +125,12 @@ uv run wandb login
 ```bash
 tmux new -s train
 cd walka_rl_mjlab
-uv run python scripts/train.py Walka-Flat --env.scene.num-envs=4096
+uv run --extra cu128 --group dev python scripts/train.py Walka-Flat --env.scene.num-envs=4096
 ```
+
+Always repeat `--extra cu128 --group dev` on every `uv run` invocation that
+touches `torch` (train/play/push_to_hub), not just the one-time setup sync —
+see Troubleshooting below for what happens if you drop it.
 
 Start with `Walka-Flat` to get a clean steps/sec and stability baseline
 before moving to `Walka-Rough` (heavier per-env cost from the terrain
@@ -223,6 +227,20 @@ console) rather than just stopping it.
 
 ## Troubleshooting
 
+- **`ImportError: libcudnn.so.9: cannot open shared object file`** (or any
+  other CUDA `.so` missing) right at `import torch`: `cu128` isn't a default
+  extra in `pyproject.toml`, so a bare `uv run python ...` (no
+  `--extra cu128 --group dev`) re-resolves against the *unconstrained*
+  dependency set and silently swaps in a different, unpinned `torch` build
+  (observed: `torch==2.13.0` with `nvidia-*-cu13` sibling packages instead
+  of the locked `torch==2.11.0+cu128`). Worse, bouncing between the two
+  resolutions a few times (e.g. `uv sync --extra cu128` → bare `uv run` →
+  `uv sync --extra cu128` again) can leave the venv in a broken half-state —
+  `nvidia_cudnn_cu12`'s `dist-info` present but its actual `lib/libcudnn.so*`
+  files missing, so `uv` considers it "installed" and won't refetch it. Fix:
+  `rm -rf .venv && uv sync --locked --extra cu128 --group dev` for a clean
+  rebuild, then always pass `--extra cu128 --group dev` on every subsequent
+  `uv run` that touches `torch`, with no exceptions.
 - **CUDA/driver mismatch at `uv sync`**: pick a different offer — vast.ai
   lists each host's driver version; it needs to support CUDA 12.8.
 - **OOM during `env` construction or the first PPO update**: lower
