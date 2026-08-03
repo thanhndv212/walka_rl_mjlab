@@ -119,10 +119,27 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         num_slots=1,
         track_air_time=False,
     )
+    # v1.3: hands-then-lunge get-up strategy (docs/get_up_task.md) --
+    # hand_supported_rise / foot_advance need to know when the hands are
+    # planted on the ground.
+    hands_ground_cfg = ContactSensorCfg(
+        name="hands_ground_contact",
+        primary=ContactMatch(
+            mode="subtree",
+            pattern=r"^(handL|handR)$",
+            entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force"),
+        reduce="netforce",
+        num_slots=1,
+        track_air_time=True,
+    )
     cfg.scene.sensors = (
         feet_ground_cfg,
         self_collision_cfg,
         body_ground_cfg,
+        hands_ground_cfg,
     )
 
     # --- Actions ---
@@ -172,6 +189,10 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "body_contact": ObservationTermCfg(
             func=mdp.body_contact,
             params={"sensor_name": "body_ground_contact"},
+        ),
+        "hand_contact": ObservationTermCfg(
+            func=mdp.foot_contact,
+            params={"sensor_name": "hands_ground_contact"},
         ),
     }
 
@@ -308,11 +329,17 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # Stable-base style rewards (HoST's style_shank_orientation /
     # style_ground_parallel — reward a feet-planted crouch as the
     # intermediate pose to rise from, gated to the rising phase):
-    #   shank_vertical (weight 2.0), feet_level (weight 2.5)
+    #   shank_vertical (weight 2.0), feet_level (weight 2.5, gated at
+    #   SUCCESS_HEIGHT not STAGE_THRESHOLD -- see its params comment)
     # Dense HumanUP-style Delta-progress (docs/get_up_task.md Step 1), gives
     # gradient far from target where the saturating task/style rewards above
     # are ~flat:
     #   height_progress / feet_force_progress
+    # v1.3 hands-then-lunge get-up strategy (observed in v1.2 rollouts
+    # converging to face-down, arms/legs spread -- see docs/get_up_task.md):
+    #   hand_supported_rise (weight 2.0) — push torso up while both hands
+    #   planted; foot_advance (weight 1.5) — one foot steps forward while a
+    #   hand is still down
     # Conditional style (zeroed during rising, active near standing):
     #   stand_still_pose — penalize joint deviation from default (weight -0.5)
     # Regularization:
@@ -351,13 +378,31 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "feet_level": RewardTermCfg(
             func=mdp.feet_level,
             weight=2.5,
-            params={"stage_threshold": STAGE_THRESHOLD},
+            # Gated at SUCCESS_HEIGHT (not STAGE_THRESHOLD): a v1.3
+            # hands-then-lunge get-up needs one foot briefly higher than the
+            # other mid-step (foot_advance below) -- enforcing double-support
+            # symmetry starting at STAGE_THRESHOLD would fight that exact
+            # motion. Only require symmetry once genuinely near-standing.
+            params={"stage_threshold": SUCCESS_HEIGHT},
         ),
         "height_progress": RewardTermCfg(func=mdp.height_progress, weight=2.0),
         "feet_force_progress": RewardTermCfg(
             func=mdp.feet_force_progress,
             weight=1.0,
             params={"sensor_name": "feet_ground_contact"},
+        ),
+        "hand_supported_rise": RewardTermCfg(
+            func=mdp.hand_supported_rise,
+            weight=2.0,
+            params={
+                "sensor_name": "hands_ground_contact",
+                "stage_threshold": STAGE_THRESHOLD,
+            },
+        ),
+        "foot_advance": RewardTermCfg(
+            func=mdp.foot_advance,
+            weight=1.5,
+            params={"hand_sensor_name": "hands_ground_contact"},
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),

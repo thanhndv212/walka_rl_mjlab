@@ -19,6 +19,11 @@ Key design decisions:
 - shank_vertical / feet_level: HoST's style_shank_orientation /
   style_ground_parallel — reward a stable, feet-planted crouch as the
   intermediate pose to rise from, gated to the rising phase
+- hand_supported_rise / foot_advance (v1.3): reward a human-like
+  hands-then-lunge get-up strategy observed in v1.2 rollouts (converging
+  to face-down, arms/legs spread) -- push the torso up with both hands
+  planted, then step one foot forward to pivot upright. See
+  docs/get_up_task.md.
 - stand_on_feet: binary success signal (both feet contact + height)
 - stand_still_pose: conditional penalty, zeroed during rising phase
   (the HumanUP/HoST insight: style penalties must be zeroed during
@@ -34,6 +39,7 @@ import torch
 from mjlab.managers.manager_base import ManagerTermBase
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
+from mjlab.utils.lab_api.math import quat_apply_inverse, yaw_quat
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -101,6 +107,12 @@ class shank_vertical(ManagerTermBase):
     lying down in the first place, but the gate keeps it consistent with
     the other stable-base reward below and avoids rewarding incidental
     shin angles during the fall/settle transient.
+
+    Uses max(dim=-1) across the two legs, not mean: a human-like
+    hands-then-lunge get-up (see hand_supported_rise/foot_advance below)
+    puts only the *front* leg vertical while the trailing leg stays bent --
+    averaging both would dilute this to below the tolerance threshold
+    exactly when the front leg is doing the real work of forming the pivot.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
@@ -126,7 +138,7 @@ class shank_vertical(ManagerTermBase):
         knee_pos = asset.data.body_link_pos_w[:, self._knee_ids, :]  # (B, 2, 3)
         foot_pos = asset.data.body_link_pos_w[:, self._foot_ids, :]
         shank = knee_pos - foot_pos
-        verticality = (shank[..., 2] / shank.norm(dim=-1)).mean(dim=-1)
+        verticality = (shank[..., 2] / shank.norm(dim=-1)).max(dim=-1).values
         reward = _tolerance(verticality, lower=0.8, margin=0.1)
         h = asset.data.root_link_pos_w[:, 2]
         return reward * (h > stage_threshold).float()
@@ -164,6 +176,94 @@ class feet_level(ManagerTermBase):
         reward = torch.exp(-var * var_scale)
         h = asset.data.root_link_pos_w[:, 2]
         return reward * (h > stage_threshold).float()
+
+
+class hand_supported_rise(ManagerTermBase):
+    """Dense reward for raising the pelvis while both hands are planted on
+    the ground -- the "push up from prone" phase of a human-like get-up
+    sequence observed in v1.2 rollouts (converging to face-down, arms/legs
+    spread): extend the arms to lift the torso before a foot steps forward
+    (see foot_advance below). Mirrors height_progress's delta pattern,
+    restricted to (a) both hands in contact and (b) still below
+    stage_threshold, so it specifically credits this transition rather than
+    generically rewarding any upward motion the way height_progress already
+    does.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(env)
+        del cfg
+        self._prev_h = torch.zeros(env.num_envs, device=env.device)
+        self._has_prev = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        self._has_prev[env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        stage_threshold: float,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        sensor: ContactSensor = env.scene.sensors[sensor_name]
+        both_hands = (sensor.data.current_contact_time > 0).all(dim=1)
+        h = env.scene[asset_cfg.name].data.root_link_pos_w[:, 2]
+        delta = torch.where(
+            self._has_prev, (h - self._prev_h).clamp(min=0.0), torch.zeros_like(h)
+        )
+        self._prev_h = h.clone()
+        self._has_prev = torch.ones_like(self._has_prev)
+        return delta * both_hands.float() * (h < stage_threshold).float()
+
+
+class foot_advance(ManagerTermBase):
+    """Reward one foot stepping forward of the pelvis while at least one
+    hand is still down -- the asymmetric lunge that bridges a
+    hand-supported push-up to standing (plant hands, step one foot forward
+    and under the hips, push up through that leg). "Forward" is measured in
+    the pelvis's current *yaw-only* heading frame (mjlab's ``yaw_quat``),
+    not a fixed world axis, since yaw is randomized at reset -- ignoring
+    current roll/pitch tilt matters here because the pelvis is usually
+    still tilted during this exact phase. Gated on hand contact (not
+    height) so it targets this specific transition, not general foot
+    placement once already standing.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(env)
+        foot_names = cfg.params.get("foot_body_names", ("footL", "footR"))
+        asset = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
+        foot_ids, _ = asset.find_bodies(list(foot_names), preserve_order=True)
+        self._foot_ids = foot_ids
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        hand_sensor_name: str,
+        forward_target: float = 0.15,
+        forward_margin: float = 0.1,
+        foot_body_names: tuple[str, str] = ("footL", "footR"),
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del foot_body_names  # consumed in __init__ only
+        asset = env.scene[asset_cfg.name]
+        sensor: ContactSensor = env.scene.sensors[hand_sensor_name]
+        any_hand = (sensor.data.current_contact_time > 0).any(dim=1)
+
+        heading = yaw_quat(asset.data.root_link_quat_w)  # (B, 4)
+        n_feet = len(self._foot_ids)
+        heading_expanded = heading.unsqueeze(1).expand(-1, n_feet, -1)
+        rel = (
+            asset.data.body_link_pos_w[:, self._foot_ids, :]
+            - asset.data.root_link_pos_w.unsqueeze(1)
+        )
+        forward_offset = quat_apply_inverse(heading_expanded, rel)[..., 0]
+        most_advanced = forward_offset.max(dim=-1).values
+        reward = _tolerance(most_advanced, forward_target, forward_margin)
+        return reward * any_hand.float()
 
 
 def stand_on_feet(
