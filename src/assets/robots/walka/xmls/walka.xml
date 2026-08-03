@@ -44,7 +44,7 @@
             <joint name="L_yaw_hip_joint" pos="0 0 0" axis="0 0 1" range="0 3.14159" />
             <geom type="mesh" mesh="Circle_026" name="lowerFemurL_collision" />
             <body name="kneeL" pos="0 0 -3e-07">
-              <joint name="L_pitch_knee_joint" pos="0 0 0" axis="0 1 0" range="-0.174533 1.74533" />
+              <joint name="L_pitch_knee_joint" pos="0 0 0" axis="0 1 0" range="-0.174533 2.79253" />
               <geom type="mesh" mesh="Circle_025" name="kneeL_collision" />
               <geom type="mesh" mesh="Circle_024" pos="0.0 0.0 -0.248" name="kneeL_collision_1" />
               <body name="ankleL" pos="0.0 0.0 -0.2480001">
@@ -70,7 +70,7 @@
             <joint name="R_yaw_hip_joint" pos="0 0 0" axis="0 0 1" range="-1.5708 1.5708" />
             <geom type="mesh" mesh="Circle_001" name="lowerFemurR_collision" />
             <body name="kneeR" pos="0 0 -3e-07">
-              <joint name="R_pitch_knee_joint" pos="0 0 0" axis="0 1 0" range="-0.174533 1.74533" />
+              <joint name="R_pitch_knee_joint" pos="0 0 0" axis="0 1 0" range="-0.174533 2.79253" />
               <geom type="mesh" mesh="Circle_030" name="kneeR_collision" />
               <geom type="mesh" mesh="Circle_055" pos="0.0 0.0 -0.248" name="kneeR_collision_1" />
               <body name="ankleR" pos="0.0 0.0 -0.2480001">

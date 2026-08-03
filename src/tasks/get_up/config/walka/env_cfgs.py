@@ -12,17 +12,17 @@ Key design decisions:
 - Initial poses: randomized near-ground pelvis height + full roll/pitch
   range (supine/prone/side) + randomized joint angles (±0.5 rad from
   default). No pre-generated fall trajectories — single distribution.
-- Rewards: base_height_exp (primary) + upright + stand_on_feet (success
-  signal) + body_up_exp (orientation) + conditional stand_still_pose
-  (zeroed during rising) + regularization penalties.
+- Rewards (v1.2, see docs/get_up_task.md): task_progress (multiplicative
+  height x orientation, HoST's core mechanism) + shank_vertical/feet_level
+  (stable planted-feet crouch) + stand_on_feet (success signal) +
+  height_progress/feet_force_progress (dense shaping) + conditional
+  stand_still_pose (zeroed during rising) + regularization penalties.
 - Terminations: height bounds only (no bad_orientation — the robot starts
   fallen). Too low (<0.05m) = collapsed, too high (>1.2m) = exploiting.
 - No curriculum for v1; standing-probability curriculum can be added
   later if single-distribution training gets stuck (research warns this
   is a risk — the "kneeling trap" local minimum).
 """
-
-import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
@@ -289,56 +289,69 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
     }
 
-    # --- Rewards ---
-    # Task rewards (primary get-up signal):
-    #   base_height_exp — reach standing pelvis height (weight 5.0)
-    #   upright_gated — keep pelvis level, height-gated (weight 1.0)
+    # --- Rewards (v1.2, HoST-code-verified restructure, see docs/get_up_task.md) ---
+    # STANDING_HEIGHT is the pelvis height at the default standing pose.
+    # The four *_HEIGHT constants below follow HoST's own "extend to new
+    # robots" tips (ratios of standing height, checked directly against
+    # InternRobotics/HoST's public code): stage1/2 ~=35%, stage3/success
+    # ~=70%, task-reward target ~=75%.
+    #
+    # Task reward (primary get-up signal):
+    #   task_progress — multiplicative height x orientation (HoST's core
+    #   anti-exploit mechanism: "follow 'Learning to Get Up'" in their code).
+    #   Replaces v1.1's additive base_height_exp + upright_gated + body_up_exp
+    #   stack, which let a policy max out orientation independent of height
+    #   -- exactly what the v1.1 burst test showed (upright ~0.95 while
+    #   genuine fallen-recovery stayed at 0%, scripts/eval_fallen_recovery.py).
+    #   (weight 6.0)
     #   stand_on_feet — binary success: both feet contact + height (weight 2.5)
-    #   body_up — torso upright orientation, height-gated (weight 0.25)
-    #   height_progress / feet_force_progress — dense HumanUP-style Δ-progress
-    #   reward (docs/get_up_task.md Step 1), added to give gradient far from
-    #   target_height where base_height_exp's narrow Gaussian is ~flat —
-    #   the exact condition the kneeling trap exploited.
-    # STAGE_THRESHOLD gates upright_gated/body_up to h > 0.35m (docs/get_up_task.md
-    # Step 2): the burst-tested Step-1-only run showed the policy farming
-    # upright/body_up near their reward ceiling from a kneeling/low pose
-    # (Episode_Reward/upright ~0.95) while genuine fallen-recovery stayed at
-    # 0% (scripts/eval_fallen_recovery.py) — Step 1's dense progress rewards
-    # alone weren't enough to outweigh that free, height-independent signal.
+    # Stable-base style rewards (HoST's style_shank_orientation /
+    # style_ground_parallel — reward a feet-planted crouch as the
+    # intermediate pose to rise from, gated to the rising phase):
+    #   shank_vertical (weight 2.0), feet_level (weight 2.5)
+    # Dense HumanUP-style Delta-progress (docs/get_up_task.md Step 1), gives
+    # gradient far from target where the saturating task/style rewards above
+    # are ~flat:
+    #   height_progress / feet_force_progress
     # Conditional style (zeroed during rising, active near standing):
     #   stand_still_pose — penalize joint deviation from default (weight -0.5)
     # Regularization:
     #   dof_pos_limits, action_rate_l2, self_collisions, joint_vel, torques
     # Termination penalty:
     #   is_terminated — strong penalty for falling/terminating (weight -500)
-    STAGE_THRESHOLD = 0.35
+    STANDING_HEIGHT = 0.832
+    STAGE_THRESHOLD = 0.35 * STANDING_HEIGHT  # ~0.29m
+    SUCCESS_HEIGHT = 0.70 * STANDING_HEIGHT  # ~0.58m
+    TASK_HEIGHT_TARGET = 0.75 * STANDING_HEIGHT  # ~0.62m
     cfg.rewards = {
-        "base_height": RewardTermCfg(
-            func=mdp.base_height_exp,
-            weight=5.0,
-            params={"target_height": 0.832, "std": 0.1},
-        ),
-        "upright": RewardTermCfg(
-            func=mdp.upright_gated,
-            weight=1.0,
+        "task_progress": RewardTermCfg(
+            func=mdp.task_progress,
+            weight=6.0,
             params={
-                "std": math.sqrt(0.2),
-                "stage_threshold": STAGE_THRESHOLD,
+                "height_target": TASK_HEIGHT_TARGET,
+                "height_margin": 0.25,
+                "orientation_threshold": 0.99,
+                "orientation_margin": 0.3,
                 "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",)),
             },
         ),
         "stand_on_feet": RewardTermCfg(
             func=mdp.stand_on_feet,
             weight=2.5,
-            params={"sensor_name": "feet_ground_contact", "target_height": 0.7},
-        ),
-        "body_up": RewardTermCfg(
-            func=mdp.body_up_exp,
-            weight=0.25,
             params={
-                "stage_threshold": STAGE_THRESHOLD,
-                "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",)),
+                "sensor_name": "feet_ground_contact",
+                "target_height": SUCCESS_HEIGHT,
             },
+        ),
+        "shank_vertical": RewardTermCfg(
+            func=mdp.shank_vertical,
+            weight=2.0,
+            params={"stage_threshold": STAGE_THRESHOLD},
+        ),
+        "feet_level": RewardTermCfg(
+            func=mdp.feet_level,
+            weight=2.5,
+            params={"stage_threshold": STAGE_THRESHOLD},
         ),
         "height_progress": RewardTermCfg(func=mdp.height_progress, weight=2.0),
         "feet_force_progress": RewardTermCfg(
@@ -365,7 +378,7 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             func=mdp.stand_still_pose,
             weight=-0.5,
             params={
-                "target_height": 0.7,
+                "target_height": SUCCESS_HEIGHT,
                 "std": 0.1,
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(".*",)),
             },
@@ -398,7 +411,10 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     cfg.metrics = {
         "standing_success": MetricsTermCfg(
             func=mdp.standing_success,
-            params={"target_height": 0.7, "sensor_name": "feet_ground_contact"},
+            params={
+                "target_height": SUCCESS_HEIGHT,
+                "sensor_name": "feet_ground_contact",
+            },
         ),
     }
 

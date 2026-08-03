@@ -1,16 +1,25 @@
-"""Get-up task rewards: height, upright, stand-on-feet, and conditional pose.
+"""Get-up task rewards: multiplicative task progress, stable-base style
+rewards, stand-on-feet, and conditional pose.
 
 Ported from the composite reward design of HumanUP (RSS 2025) and HoST
 (RSS 2025 Best Systems Paper Finalist), adapted for mjlab's manager-based
-env architecture. The core idea: a set of task rewards (height + upright +
-stand-on-feet) provides the primary "get up" signal, while a conditional
-pose penalty only activates when near standing height to avoid conflicting
-with the rising motion.
+env architecture. v1.2 replaces the additive height+upright+body_up stack
+with HoST's actual mechanism (verified against their public code,
+InternRobotics/HoST): a single *multiplicative* height x orientation task
+reward (``task_progress``), so a policy can't max out orientation while
+ignoring height (or vice versa) the way independent additive terms allow --
+this is what their code comments cite as "follow 'Learning to Get Up'", and
+it's a structurally stronger anti-exploit than height-gating alone (v1.1,
+now removed). See docs/get_up_task.md for the full research trail.
 
-Key design decisions (from research, see .slim/deepwork/get-up-task.md):
-- base_height_exp: exp(-|h - h_target|² / std²) — smooth height reward
+Key design decisions:
+- task_progress: tolerance(height) * tolerance(orientation) — HoST's core
+  mechanism, both must be earned together, continuously (not just above a
+  gate)
+- shank_vertical / feet_level: HoST's style_shank_orientation /
+  style_ground_parallel — reward a stable, feet-planted crouch as the
+  intermediate pose to rise from, gated to the rising phase
 - stand_on_feet: binary success signal (both feet contact + height)
-- body_up_exp: clamped projected gravity z — upright orientation
 - stand_still_pose: conditional penalty, zeroed during rising phase
   (the HumanUP/HoST insight: style penalties must be zeroed during
   get-up or they conflict with the task reward)
@@ -18,13 +27,13 @@ Key design decisions (from research, see .slim/deepwork/get-up-task.md):
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING
 
 import torch
 from mjlab.managers.manager_base import ManagerTermBase
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.sensor import ContactSensor
-from mjlab.utils.lab_api.math import quat_apply_inverse
 
 if TYPE_CHECKING:
     from mjlab.envs import ManagerBasedRlEnv
@@ -33,21 +42,128 @@ if TYPE_CHECKING:
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
-def base_height_exp(
+def _tolerance(
+    x: torch.Tensor, lower: float, margin: float, value_at_margin: float = 0.1
+) -> torch.Tensor:
+    """1.0 for x >= lower, smooth Gaussian falloff below it over `margin`.
+
+    Ported from dm_control's ``rewards.tolerance`` with bounds=(lower, inf)
+    -- the exact shape HoST's own orientation/head_height rewards use
+    (InternRobotics/HoST, legged_gym/legged_gym/envs/g1/g1_utils.py).
+    """
+    scale = math.sqrt(-2 * math.log(value_at_margin))
+    d = (lower - x).clamp(min=0.0) / margin
+    return torch.where(x >= lower, torch.ones_like(x), torch.exp(-0.5 * (d * scale) ** 2))
+
+
+def task_progress(
     env: ManagerBasedRlEnv,
-    target_height: float,
-    std: float,
+    height_target: float,
+    height_margin: float,
+    orientation_threshold: float,
+    orientation_margin: float,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Exponential reward for reaching target pelvis height.
+    """Multiplicative height x orientation progress -- HoST's core anti-
+    exploit mechanism. Replaces the v1.1 additive base_height_exp +
+    upright_gated + body_up_exp stack: those three were independent,
+    additive terms, so a policy could max out orientation (e.g. hold the
+    torso vertical from a low kneel) largely independent of height, and the
+    v1.1 empirical burst test showed exactly that (Episode_Reward/upright
+    near its ceiling while genuine fallen-recovery stayed at 0%, see
+    docs/get_up_task.md). Multiplying the two components forces both to be
+    earned together continuously -- not just above a single gate threshold --
+    since either component near zero collapses the whole product.
 
-    exp(-|h - h_target|² / std²). Saturates at 1.0 when at target height,
-    decays smoothly as height deviates. This is the primary task signal
-    from HumanUP/HoST — the robot must raise its pelvis to standing height.
+    height_target/orientation_threshold are the point past which each
+    component saturates to 1.0; margin controls the falloff width below
+    that point. Per HoST's "extend to new robots" tips: height_target ~=
+    75% of standing height, orientation_threshold ~= 0.99 (tight -- this
+    reward wants a properly vertical torso, not just "roughly upright").
     """
     asset = env.scene[asset_cfg.name]
     h = asset.data.root_link_pos_w[:, 2]
-    return torch.exp(-torch.square(h - target_height) / std**2)
+    pg_z = asset.data.projected_gravity_b[:, 2]  # -1 == perfectly upright
+    height_component = _tolerance(h, height_target, height_margin)
+    orientation_component = _tolerance(-pg_z, orientation_threshold, orientation_margin)
+    return height_component * orientation_component
+
+
+class shank_vertical(ManagerTermBase):
+    """Reward shins (knee-to-foot) oriented vertically -- HoST's
+    style_shank_orientation. A crouched/kneeling base with vertical shins
+    (feet planted roughly under the knees) is the stable intermediate pose
+    HoST engineers a policy to pass through before standing -- one concrete
+    answer to "use the knees to form a stable base first". Gated to the
+    rising phase (stage_threshold) so it doesn't reward a shin angle while
+    still flat on the ground; unlike v1.1's gate this doesn't need to
+    prevent farming since there's no way to have "vertical shins" while
+    lying down in the first place, but the gate keeps it consistent with
+    the other stable-base reward below and avoids rewarding incidental
+    shin angles during the fall/settle transient.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(env)
+        knee_names = cfg.params.get("knee_body_names", ("kneeL", "kneeR"))
+        foot_names = cfg.params.get("foot_body_names", ("footL", "footR"))
+        asset = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
+        knee_ids, _ = asset.find_bodies(list(knee_names), preserve_order=True)
+        foot_ids, _ = asset.find_bodies(list(foot_names), preserve_order=True)
+        self._knee_ids = knee_ids
+        self._foot_ids = foot_ids
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        stage_threshold: float,
+        knee_body_names: tuple[str, str] = ("kneeL", "kneeR"),
+        foot_body_names: tuple[str, str] = ("footL", "footR"),
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del knee_body_names, foot_body_names  # consumed in __init__ only
+        asset = env.scene[asset_cfg.name]
+        knee_pos = asset.data.body_link_pos_w[:, self._knee_ids, :]  # (B, 2, 3)
+        foot_pos = asset.data.body_link_pos_w[:, self._foot_ids, :]
+        shank = knee_pos - foot_pos
+        verticality = (shank[..., 2] / shank.norm(dim=-1)).mean(dim=-1)
+        reward = _tolerance(verticality, lower=0.8, margin=0.1)
+        h = asset.data.root_link_pos_w[:, 2]
+        return reward * (h > stage_threshold).float()
+
+
+class feet_level(ManagerTermBase):
+    """Reward both feet at the same height -- HoST's style_ground_parallel,
+    their single largest-weighted style reward (double-support stability:
+    both feet flat/level forms the base to push up from, not one foot still
+    tucked under). Smooth exp-decay of the height variance rather than
+    HoST's binary threshold, consistent with this task's general bias
+    toward dense gradients over sparse ones. Gated to the rising phase,
+    same reasoning as shank_vertical above.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(env)
+        foot_names = cfg.params.get("foot_body_names", ("footL", "footR"))
+        asset = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
+        foot_ids, _ = asset.find_bodies(list(foot_names), preserve_order=True)
+        self._foot_ids = foot_ids
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        stage_threshold: float,
+        var_scale: float = 50.0,
+        foot_body_names: tuple[str, str] = ("footL", "footR"),
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del foot_body_names  # consumed in __init__ only
+        asset = env.scene[asset_cfg.name]
+        foot_z = asset.data.body_link_pos_w[:, self._foot_ids, 2]  # (B, 2)
+        var = foot_z.var(dim=-1)
+        reward = torch.exp(-var * var_scale)
+        h = asset.data.root_link_pos_w[:, 2]
+        return reward * (h > stage_threshold).float()
 
 
 def stand_on_feet(
@@ -70,72 +186,6 @@ def stand_on_feet(
     h = asset.data.root_link_pos_w[:, 2]
     tall_enough = h > target_height
     return (both_feet & tall_enough).float()
-
-
-def body_up_exp(
-    env: ManagerBasedRlEnv,
-    stage_threshold: float,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward for torso being upright. Clamped projected gravity z, height-gated.
-
-    Returns clamp(-projected_gravity_b[:, 2], 0, 1) * (h > stage_threshold):
-    1.0 when perfectly upright (gravity points straight down in body frame,
-    pg_z=-1) AND above stage_threshold, 0.0 when sideways/upside down OR
-    still on the ground. Smooth, bounded above the gate.
-
-    This is the orientation complement to base_height_exp — height alone
-    doesn't distinguish kneeling from standing (the "kneeling trap"
-    pitfall flagged in the research). body_up_exp ensures the torso is
-    actually vertical, not just high.
-
-    The stage_threshold gate (docs/get_up_task.md Step 2) closes the
-    "kneeling trap" exploit directly: without it, this term (and
-    ``upright_gated``) pays full reward for a vertical torso regardless of
-    height, which the empirical burst-test run showed a policy can farm
-    indefinitely from a kneeling/low pose (``Episode_Reward/upright`` sat
-    near its 0.95+ ceiling for the whole run while height rewards stayed
-    far below theirs) -- Step 1's dense progress rewards alone weren't
-    enough to outweigh that free, height-independent signal. Pick
-    stage_threshold well below stand_on_feet's target_height (e.g.
-    0.3-0.4m vs. 0.7m) so early genuine progress still gets rewarded; the
-    goal is closing the free-reward exploit, not making the reward sparse.
-    """
-    asset = env.scene[asset_cfg.name]
-    pg = asset.data.projected_gravity_b
-    h = asset.data.root_link_pos_w[:, 2]
-    gate = (h > stage_threshold).float()
-    return torch.clamp(-pg[:, 2], min=0.0, max=1.0) * gate
-
-
-def upright_gated(
-    env: ManagerBasedRlEnv,
-    std: float,
-    stage_threshold: float,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Height-gated re-derivation of mjlab's stock ``upright`` reward.
-
-    ``mjlab.tasks.velocity.mdp.rewards.upright`` is a class-based term
-    (auto-instantiated by RewardManager as ``upright(cfg, env)``, not a
-    plain function) -- it can't be wrapped by calling it like a function,
-    so its core math (projected gravity's xy magnitude -> exp(-xy²/std²))
-    is re-derived here rather than reused, then gated the same way as
-    ``body_up_exp`` above (see that docstring for why the gate exists).
-    """
-    asset = env.scene[asset_cfg.name]
-    if asset_cfg.body_ids:
-        body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
-        body_quat_w = body_quat_w.squeeze(1)
-    else:
-        body_quat_w = asset.data.root_link_quat_w
-    gravity_w = asset.data.gravity_vec_w
-    projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-    xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
-    upright = torch.exp(-xy_squared / std**2)
-    h = asset.data.root_link_pos_w[:, 2]
-    gate = (h > stage_threshold).float()
-    return upright * gate
 
 
 def stand_still_pose(
@@ -169,8 +219,9 @@ class height_progress(ManagerTermBase):
     """Dense reward for upward pelvis-height motion since the previous step.
 
     HumanUP's r_Δheight term (see docs/get_up_task.md, "Implementation and
-    validation roadmap" Step 1). base_height_exp's narrow Gaussian around
-    target_height gives near-zero gradient anywhere far from standing --
+    validation roadmap" Step 1). task_progress's height component still
+    saturates via a narrow tolerance shape around its target -- near-zero
+    gradient anywhere far below it, same as v1.1's base_height_exp before it --
     exactly the condition the "kneeling trap" exploited, since a policy that
     never experiences useful gradient toward standing has no reason to try.
     This term pays for making upward progress from wherever the robot
@@ -220,8 +271,8 @@ class feet_force_progress(ManagerTermBase):
     ``height_progress`` -- see docs/get_up_task.md Step 1. Rewards
     transferring weight onto the feet even before pelvis height itself starts
     climbing (e.g. rolling from supine onto the feet before pushing up),
-    which is a precursor to standing that base_height_exp gives no credit
-    for. Mirrors height_progress's previous-value/clamp-to-positive pattern,
+    which is a precursor to standing that task_progress's height component
+    gives no credit for. Mirrors height_progress's previous-value pattern,
     tracking summed vertical foot force instead of height.
 
     ``feet_ground_contact``'s ``reduce="netforce"`` sensor reports the
