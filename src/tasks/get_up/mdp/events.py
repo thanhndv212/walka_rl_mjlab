@@ -1,4 +1,5 @@
-"""Get-up task events: post-reset ground-clearance correction.
+"""Get-up task events: post-reset ground-clearance correction, standing-
+probability curriculum, and an assistive lift-force curriculum.
 
 Not in stock mjlab. The get-up task's initial-pose distribution samples a
 pelvis height *independent* of the sampled roll/pitch (see
@@ -154,3 +155,62 @@ def reset_to_standing_curriculum(
     joint_pos = default_joint_pos + noise
     joint_vel = torch.zeros_like(joint_pos)
     asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=standing_ids)
+
+
+def assistive_lift_force(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    body_weight_fraction: float,
+    near_vertical_threshold: float,
+    anneal_steps: int,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Decaying vertical assistive force on the pelvis while the torso is
+    near-vertical -- Step 3 of docs/get_up_task.md's roadmap: bridges the
+    ground-to-standing transition directly, rather than only shaping the
+    reward around it the way v1.1-v1.3's terms do. Mirrors HoST's own
+    ``pull_force`` mechanism (verified against InternRobotics/HoST's
+    ``host_ground.py``/``update_force_curriculum``), simplified to a global
+    step-count anneal rather than their per-env performance-gated one (which
+    needs extra persistent per-env state this event doesn't have a home
+    for).
+
+    Registered as a "step"-mode event, called unconditionally every
+    ``env.step()`` with ``env_ids=None`` (all envs) -- ``Entity.
+    write_external_wrench_to_sim``'s forces *persist* until the next write
+    or a reset, so the force must be explicitly reapplied (including
+    writing exactly 0) every single step, not just when the gate first
+    turns on, or a stale nonzero force from a previous step keeps acting
+    after the gate should have turned it off.
+
+    Gated on orientation only (``projected_gravity_b[:, 2] <
+    -near_vertical_threshold``), not height: this is intentional and matches
+    HoST -- once genuinely upright the push helps complete the stand, but
+    while still flat/tumbling it does nothing, so it can't be farmed as a
+    substitute for actually recovering orientation first.
+
+    ``max_force`` isn't a config constant -- it's recomputed each call as
+    ``body_weight_fraction * total_mass * |gravity|`` from ``mj_model``
+    (cheap: a sum over ~30 bodies), so the config expresses the HoST-derived
+    ratio (~60% of body weight) directly rather than a robot-specific
+    Newton value that would silently go stale if the robot's mass ever
+    changes. ``near_vertical_threshold`` ~= 0.8 (matches ``shank_vertical``'s
+    own threshold); ``anneal_steps`` chosen relative to the training budget
+    being run, same as ``reset_to_standing_curriculum``'s.
+    """
+    del env_ids  # "step" mode always applies to all envs (env_ids is None).
+    asset = env.scene[asset_cfg.name]
+    pg_z = asset.data.projected_gravity_b[:, 2]
+    near_vertical = (pg_z < -near_vertical_threshold).float()
+
+    gravity_mag = abs(float(env.sim.mj_model.opt.gravity[2]))
+    total_mass = float(env.sim.mj_model.body_mass.sum())
+    max_force = body_weight_fraction * total_mass * gravity_mag
+
+    progress = min(1.0, env.common_step_counter / anneal_steps)
+    force_mag = max_force * (1.0 - progress)
+
+    forces = torch.zeros(env.num_envs, 1, 3, device=env.device)
+    forces[:, 0, 2] = force_mag * near_vertical
+    torques = torch.zeros_like(forces)
+    asset.write_external_wrench_to_sim(forces, torques, body_ids=asset_cfg.body_ids)

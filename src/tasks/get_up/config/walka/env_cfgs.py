@@ -274,6 +274,22 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             mode="reset",
             params={"clearance": 0.02},
         ),
+        # Step 3 (docs/get_up_task.md): decaying assistive push while the
+        # torso is near-vertical, bridging the ground->standing transition
+        # directly instead of only shaping the reward around it. "step" mode
+        # -> called every env.step(), not just on reset. anneal_steps
+        # matches reset_to_standing_curriculum's so both fade on the same
+        # timescale relative to a full training run.
+        "assistive_lift_force": EventTermCfg(
+            func=mdp.assistive_lift_force,
+            mode="step",
+            params={
+                "body_weight_fraction": 0.6,
+                "near_vertical_threshold": 0.8,
+                "anneal_steps": 150_000,
+                "asset_cfg": SceneEntityCfg("robot", body_names=("pelvis",)),
+            },
+        ),
         "foot_friction": EventTermCfg(
             mode="startup",
             func=dr.geom_friction,
