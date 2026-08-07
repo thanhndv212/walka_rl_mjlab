@@ -24,6 +24,8 @@ Key design decisions:
   is a risk — the "kneeling trap" local minimum).
 """
 
+import math
+
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -354,15 +356,17 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # v1.3 hands-then-lunge get-up strategy (observed in v1.2 rollouts
     # converging to face-down, arms/legs spread -- see docs/get_up_task.md):
     #   hand_supported_rise (weight 2.0) — push torso up while both hands
-    #   planted; foot_advance (weight 2.0) — Delta-progress on a foot's
-    #   forward offset while a hand is still down, capped at SUCCESS_HEIGHT
-    # v1.5: hands_off_ground (weight -3.0) — penalize hand-ground contact
-    # once above SUCCESS_HEIGHT; v1.4 kept one hand down indefinitely once
-    # standing, bent forward at the waist, since nothing penalized it.
-    # v1.6: foot_advance rewritten as a Delta-progress term (was a static-
-    # condition reward) after a 15k-iteration run showed the v1.5 version
-    # could be camped indefinitely just below SUCCESS_HEIGHT for free
-    # reward -- standing_success peaked at 0.27 then collapsed to ~0.001.
+    #   planted; foot_advance (weight 1.5) — one foot steps forward while a
+    #   hand is still down
+    # v1.7 (v1.5/v1.6 reverted, see docs/get_up_task.md version history):
+    #   upper_body_upright (weight 3.0) — reward the thorax itself vertical,
+    #   gated on stand_on_feet's own condition. v1.4 (10k iterations) stood
+    #   up but stayed bent forward at the waist, propped on a hand;
+    #   task_progress's orientation component is pelvis-frame and can't see
+    #   a waist bend above it. v1.5/v1.6 attacked the symptom (penalize the
+    #   hand, then fix the camping exploit that created) without producing a
+    #   straight standing pose, so both are reverted in favor of directly
+    #   reinforcing the actual goal.
     # Conditional style (zeroed during rising, active near standing):
     #   stand_still_pose — penalize joint deviation from default (weight -0.5)
     # Regularization:
@@ -391,6 +395,20 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "sensor_name": "feet_ground_contact",
                 "target_height": SUCCESS_HEIGHT,
+            },
+        ),
+        "upper_body_upright": RewardTermCfg(
+            func=mdp.upper_body_upright,
+            # Above stand_on_feet's 2.5, same reasoning v1.5's (reverted)
+            # hands_off_ground used: the reward for straightening up needs
+            # to decisively outweigh whatever balance benefit the bent,
+            # hand-propped posture was providing, not just nudge against it.
+            weight=3.0,
+            params={
+                "std": math.sqrt(0.2),  # matches the stock `upright` class's convention
+                "sensor_name": "feet_ground_contact",
+                "target_height": SUCCESS_HEIGHT,
+                "body_name": "thorax",
             },
         ),
         "shank_vertical": RewardTermCfg(
@@ -424,28 +442,8 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "foot_advance": RewardTermCfg(
             func=mdp.foot_advance,
-            weight=2.0,
-            params={
-                "hand_sensor_name": "hands_ground_contact",
-                "success_height": SUCCESS_HEIGHT,
-            },
-        ),
-        # v1.5: v1.4 (10k-iteration run) achieved 100% genuine recovery but
-        # empirically kept one hand on the ground indefinitely once
-        # standing, bent forward at the waist -- nothing in v1.4's stack
-        # ever penalized that (see docs/get_up_task.md). foot_advance above
-        # is now capped at SUCCESS_HEIGHT (had no upper bound before); this
-        # term directly penalizes the behavior instead of just removing its
-        # incentive. Weight set slightly above stand_on_feet's (2.5) so the
-        # penalty decisively outweighs whatever balance benefit a hand on
-        # the ground provides.
-        "hands_off_ground": RewardTermCfg(
-            func=mdp.hands_off_ground,
-            weight=-3.0,
-            params={
-                "sensor_name": "hands_ground_contact",
-                "success_height": SUCCESS_HEIGHT,
-            },
+            weight=1.5,
+            params={"hand_sensor_name": "hands_ground_contact"},
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),

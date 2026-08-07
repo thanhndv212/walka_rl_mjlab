@@ -24,17 +24,22 @@ Key design decisions:
   to face-down, arms/legs spread) -- push the torso up with both hands
   planted, then step one foot forward to pivot upright. See
   docs/get_up_task.md.
-- hands_off_ground (v1.5): v1.4 (trained to 10k iterations) achieved 100%
-  genuine recovery (scripts/eval_fallen_recovery.py) but empirically kept
-  one hand on the ground indefinitely once standing, bent forward at the
-  waist -- nothing in the v1.4 stack ever penalized that. foot_advance is
-  now also capped at success_height (it had no upper height bound before),
-  and this new term directly penalizes hand contact once genuinely
-  standing, rather than just removing the incentive and hoping.
 - stand_on_feet: binary success signal (both feet contact + height)
 - stand_still_pose: conditional penalty, zeroed during rising phase
   (the HumanUP/HoST insight: style penalties must be zeroed during
   get-up or they conflict with the task reward)
+- upper_body_upright (v1.7): v1.4 (10k iterations) reached 100% genuine
+  recovery on scripts/eval_fallen_recovery.py but video inspection showed
+  the torso bent forward at the waist once standing, propped up by a hand
+  left on the ground -- see docs/get_up_task.md's version history. v1.5/v1.6
+  tried to fix this indirectly (penalize the hand, then fix a camping
+  exploit that penalty created) and neither produced a straight standing
+  pose worth keeping, so those two versions are reverted here. This term
+  instead reinforces the actual goal directly: reward the thorax itself
+  (not the pelvis -- ``task_progress``'s orientation component is pelvis-
+  frame and can't see a waist bend above it) held vertical, gated on the
+  same both-feet-planted condition as ``stand_on_feet`` so it only pays out
+  once the get-up motion is actually finished.
 """
 
 from __future__ import annotations
@@ -227,31 +232,16 @@ class hand_supported_rise(ManagerTermBase):
 
 
 class foot_advance(ManagerTermBase):
-    """Dense reward for a foot's forward offset (in the pelvis's current
-    *yaw-only* heading frame, mjlab's ``yaw_quat`` -- not a fixed world
-    axis, since yaw is randomized at reset) *increasing* -- the asymmetric
-    lunge step that bridges a hand-supported push-up to standing, rewarded
-    as progress rather than a maintained condition.
-
-    v1.5's static-condition version (pay ``tolerance(offset > target)``
-    every step the condition held, gated on hand contact and
-    ``h < success_height``) could be held indefinitely for free once
-    discovered: park the foot forward, keep a hand down, stay just below
-    success_height, collect the reward every single step forever. Confirmed
-    empirically via a 15,000-iteration run (docs/get_up_task.md v1.5
-    postmortem): standing_success peaked at 0.27 around iteration ~2000,
-    then collapsed to ~0.001 by iteration 15000, while foot_advance's own
-    logged reward climbed monotonically to its ceiling the entire time --
-    a camping exploit, not learned progress. The v1.5 fix that added the
-    success_height gate is what created this specific exploit: before that,
-    standing taller didn't cost this term anything, so there was no reward
-    incentive to avoid crossing the gate; after, crossing it meant losing
-    guaranteed income, so the policy learned to just not cross it.
-
-    Mirrors ``height_progress``/``hand_supported_rise``'s delta pattern
-    instead, which don't have this failure mode: holding a fixed position,
-    gated or not, earns a progress-reward exactly zero, so there is no
-    "camp here forever" option structurally available.
+    """Reward one foot stepping forward of the pelvis while at least one
+    hand is still down -- the asymmetric lunge that bridges a
+    hand-supported push-up to standing (plant hands, step one foot forward
+    and under the hips, push up through that leg). "Forward" is measured in
+    the pelvis's current *yaw-only* heading frame (mjlab's ``yaw_quat``),
+    not a fixed world axis, since yaw is randomized at reset -- ignoring
+    current roll/pitch tilt matters here because the pelvis is usually
+    still tilted during this exact phase. Gated on hand contact (not
+    height) so it targets this specific transition, not general foot
+    placement once already standing.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
@@ -260,19 +250,13 @@ class foot_advance(ManagerTermBase):
         asset = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
         foot_ids, _ = asset.find_bodies(list(foot_names), preserve_order=True)
         self._foot_ids = foot_ids
-        self._prev_offset = torch.zeros(env.num_envs, device=env.device)
-        self._has_prev = torch.zeros(
-            env.num_envs, dtype=torch.bool, device=env.device
-        )
-
-    def reset(self, env_ids: torch.Tensor) -> None:
-        self._has_prev[env_ids] = False
 
     def __call__(
         self,
         env: ManagerBasedRlEnv,
         hand_sensor_name: str,
-        success_height: float,
+        forward_target: float = 0.15,
+        forward_margin: float = 0.1,
         foot_body_names: tuple[str, str] = ("footL", "footR"),
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -280,7 +264,6 @@ class foot_advance(ManagerTermBase):
         asset = env.scene[asset_cfg.name]
         sensor: ContactSensor = env.scene.sensors[hand_sensor_name]
         any_hand = (sensor.data.current_contact_time > 0).any(dim=1)
-        h = asset.data.root_link_pos_w[:, 2]
 
         heading = yaw_quat(asset.data.root_link_quat_w)  # (B, 4)
         n_feet = len(self._foot_ids)
@@ -291,38 +274,8 @@ class foot_advance(ManagerTermBase):
         )
         forward_offset = quat_apply_inverse(heading_expanded, rel)[..., 0]
         most_advanced = forward_offset.max(dim=-1).values
-
-        delta = torch.where(
-            self._has_prev,
-            (most_advanced - self._prev_offset).clamp(min=0.0),
-            torch.zeros_like(most_advanced),
-        )
-        self._prev_offset = most_advanced.clone()
-        self._has_prev = torch.ones_like(self._has_prev)
-        return delta * any_hand.float() * (h < success_height).float()
-
-
-def hands_off_ground(
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    success_height: float,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Penalize any hand-ground contact once above ``success_height`` --
-    the direct complement of ``stand_on_feet``. v1.4's reward stack had no
-    term at all that ever asked the policy to let go of the ground: nothing
-    penalized a hand staying down once genuinely standing, so a "keep one
-    hand down for balance" tripod strategy was free stability with no cost
-    (see ``foot_advance``'s docstring for the empirical video evidence).
-    This term makes that specific behavior actively costly instead of just
-    removing its incentive, which is a more direct fix than hoping the
-    policy stops on its own once ``foot_advance``'s gate (above) no longer
-    rewards it.
-    """
-    sensor: ContactSensor = env.scene.sensors[sensor_name]
-    any_hand = (sensor.data.current_contact_time > 0).any(dim=1)
-    h = env.scene[asset_cfg.name].data.root_link_pos_w[:, 2]
-    return (any_hand & (h > success_height)).float()
+        reward = _tolerance(most_advanced, forward_target, forward_margin)
+        return reward * any_hand.float()
 
 
 def stand_on_feet(
@@ -345,6 +298,63 @@ def stand_on_feet(
     h = asset.data.root_link_pos_w[:, 2]
     tall_enough = h > target_height
     return (both_feet & tall_enough).float()
+
+
+class upper_body_upright(ManagerTermBase):
+    """Reward the upper body (thorax) held vertical, gated on the robot
+    genuinely standing on both feet -- same gate as ``stand_on_feet``.
+
+    v1.4 achieved standing (100% genuine recovery on
+    ``scripts/eval_fallen_recovery.py``) but video inspection showed the
+    torso stayed bent forward at the waist, propped up by a hand left on
+    the ground. ``task_progress``'s orientation component can't see this:
+    it reads ``root_link_pos_w``/root orientation, i.e. the pelvis, and the
+    pelvis can be near-vertical while ``pitch_waist_joint`` folds the
+    thorax forward above it. v1.5/v1.6 attacked the symptom instead --
+    penalize the hand that was propping up the bend, then fix a camping
+    exploit that penalty itself created -- and neither produced a straight
+    standing pose, so both are reverted (see docs/get_up_task.md's version
+    history). This term reinforces the actual goal directly: pay for the
+    thorax's own projected-gravity verticality, mirroring the stock
+    ``upright`` class's math (``mjlab.tasks.velocity.mdp.rewards.upright``)
+    but targeted at the thorax body instead of the pelvis.
+
+    Gated on ``stand_on_feet``'s own condition (both feet contact + height
+    above target), not just height alone, so this only reinforces posture
+    once the get-up motion is actually finished -- rising through a bent
+    intermediate pose (e.g. the hand-supported push-up phase) isn't
+    penalized or contradicted, consistent with the conditional-style
+    insight ``stand_still_pose`` already follows elsewhere in this file.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
+        super().__init__(env)
+        body_name = cfg.params.get("body_name", "thorax")
+        asset = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
+        body_ids, _ = asset.find_bodies([body_name], preserve_order=True)
+        self._body_id = body_ids[0]
+
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        std: float,
+        sensor_name: str,
+        target_height: float,
+        body_name: str = "thorax",
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        del body_name  # consumed in __init__ only
+        asset = env.scene[asset_cfg.name]
+        body_quat_w = asset.data.body_link_quat_w[:, self._body_id, :]
+        projected_gravity_b = quat_apply_inverse(body_quat_w, asset.data.gravity_vec_w)
+        xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
+        upright_reward = torch.exp(-xy_squared / std**2)
+
+        sensor: ContactSensor = env.scene.sensors[sensor_name]
+        both_feet = (sensor.data.current_contact_time > 0).all(dim=1)
+        h = asset.data.root_link_pos_w[:, 2]
+        standing = both_feet & (h > target_height)
+        return upright_reward * standing.float()
 
 
 def stand_still_pose(

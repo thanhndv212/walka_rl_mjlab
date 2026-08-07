@@ -5,6 +5,21 @@ the design follows from research on humanoid fall recovery (HumanUP,
 HoST, Learning to Get Up, UHG). Most terms are custom
 (`src/tasks/get_up/mdp/`); the stock mjlab terms used are noted inline.
 
+**Status (v1.7):** v1.4 (W&B `c3b1ytc6`, `model_9999.pt`) is the best
+checkpoint this task has produced — **100% genuine recovery** from
+genuinely fallen poses (`scripts/eval_fallen_recovery.py`) — but its
+standing pose is wrong: a bent-forward waist, propped by a hand left on
+the ground. v1.5 and v1.6 both tried to fix that posture indirectly
+(penalize the hand, then fix an exploit that penalty created) and are
+reverted: v1.5 collapsed to ~0% recovery, and v1.6 — despite fixing its
+specific exploit — regressed all the way to **1.7% genuine recovery**,
+statistically indistinguishable from a policy that does nothing (verified
+independently this session; its own training-log metric alone had
+understated how bad this was). v1.7 reverts to the v1.4 baseline and
+reinforces upper-body verticality directly instead. See "Version history
+and training campaign log" below for the full log, numbers, and how each
+version was verified.
+
 ## Overview
 
 `Walka-GetUp` trains a policy to recover from fallen poses — supine
@@ -24,20 +39,32 @@ than standing upright.
 
 ## Reward design
 
-What each of the 11 reward terms in `RewardManager` does, why it's
+**This section describes the v1.7 reward set** (v1.4's task/style/
+progress terms, plus v1.7's `upper_body_upright`; v1.5/v1.6 are reverted).
+See "Version history and training campaign log" below for how the design
+got here — the v1.1 stack this section originally documented
+(`base_height_exp` + stock `upright` + `body_up_exp`, all additive) was
+replaced wholesale in v1.2 and no longer exists in code.
+
+What each of the 16 reward terms in `RewardManager` does, why it's
 there, and how it shapes the get-up motion. The reward structure
 follows the composite design from HumanUP (RSS 2025) and HoST (RSS 2025
 Best Systems Paper Finalist): a set of task rewards provides the
-primary "get up" signal, a conditional style penalty only activates
-when near standing, and regularization penalties keep the motion
-smooth and safe.
+primary "get up" signal, style rewards (some conditional, some gated to
+a rising or standing phase) shape *how* it gets there, and
+regularization penalties keep the motion smooth and safe.
 
 | Term | Weight | Kind | One-line purpose |
 |---|---|---|---|
-| `base_height` | 5.0 | bonus | Reach standing pelvis height |
-| `upright` | 1.0 | bonus | Keep the pelvis level |
+| `task_progress` | 6.0 | bonus | Multiplicative height × orientation (pelvis) — the core anti-exploit task signal |
 | `stand_on_feet` | 2.5 | bonus | Binary success: both feet contact + height |
-| `body_up` | 0.25 | bonus | Torso upright orientation |
+| `upper_body_upright` | 3.0 | bonus (v1.7) | Thorax held vertical, gated on `stand_on_feet`'s condition |
+| `shank_vertical` | 2.0 | bonus | Shins vertical — stable planted-feet crouch, gated to rising phase |
+| `feet_level` | 2.5 | bonus | Both feet at the same height, gated at `SUCCESS_HEIGHT` |
+| `height_progress` | 2.0 | bonus | Dense reward for upward pelvis motion since the previous step |
+| `feet_force_progress` | 1.0 | bonus | Dense reward for increasing vertical ground-reaction force |
+| `hand_supported_rise` | 2.0 | bonus | Reward raising the pelvis while both hands are planted (push-up phase) |
+| `foot_advance` | 1.5 | bonus | Reward a foot stepping forward of the pelvis while a hand is still down |
 | `dof_pos_limits` | -1.0 | penalty | Stay inside soft joint limits |
 | `action_rate_l2` | -0.1 | penalty | Smooth actions (discourage jitter) |
 | `self_collisions` | -1.0 | penalty | Avoid self-contact above 10N |
@@ -48,42 +75,67 @@ smooth and safe.
 
 ### Task rewards — the actual objective
 
-**`base_height`** (`src/tasks/get_up/mdp/rewards.py::base_height_exp`,
-weight 5.0, `target_height=0.832`, `std=0.1`) is the primary task
-signal: `exp(-|h - h_target|² / std²)`, where `h` is the pelvis
-z-position and `h_target=0.832` is the standing height from
-`walka_constants.py::INIT_STATE`. Saturates at 1.0 when the pelvis is at
-standing height and decays smoothly as height deviates. This is the
-single biggest reward weight — the policy's primary drive is "raise
-the pelvis." The `std=0.1` makes the reward sensitive within ~10cm of
-the target, so the policy gets meaningful gradient even when close.
-
-**`upright`** (stock mjlab `upright` class, weight 1.0,
-`std=√0.2`, `asset_cfg.body_names=("pelvis",)`) penalizes the pelvis's
-tilt relative to world-up (projected gravity's xy component in the
-pelvis frame). Same term as the velocity task — keeps the pelvis
-level. This is the complement to `base_height`: height alone doesn't
-distinguish kneeling from standing (the "kneeling trap" pitfall
-flagged in the research), so `upright` ensures the pelvis is actually
-vertical, not just high.
+**`task_progress`** (`src/tasks/get_up/mdp/rewards.py::task_progress`,
+weight 6.0, `height_target=0.75×0.832≈0.62m`, `orientation_threshold=0.99`,
+`asset_cfg.body_names=("pelvis",)`) is the primary task signal, added in
+v1.2 to replace the v1.1 additive stack (`base_height_exp` + `upright` +
+`body_up_exp`) named above. It's a *multiplicative* height × orientation
+tolerance — both `height_component` and `orientation_component` must be
+satisfied together, continuously, since either near zero collapses the
+whole product. Ported from HoST's actual mechanism (verified against
+InternRobotics/HoST's public code, which cites "follow 'Learning to Get
+Up'"). This is a structurally stronger anti-exploit than the v1.1 additive
+terms or height-gating alone: the v1.1 stack let a policy max out
+orientation (hold the pelvis vertical from a low kneel) largely
+independent of height — see "Confirmed: the kneeling trap" below for the
+empirical burst test that caught this.
 
 **`stand_on_feet`** (`src/tasks/get_up/mdp/rewards.py::stand_on_feet`,
-weight 2.5, `target_height=0.7`) is the binary success signal: returns
-1.0 when both feet are in contact with the ground AND the pelvis is
-above 0.7m, else 0.0. This prevents reward hacking where the robot
-achieves height without actually standing on its feet (e.g. propping on
-knees or hands). Mirrors HumanUP's `stand_on_feet` term — the robot
-must be standing on both feet at sufficient height to earn this
-reward.
+weight 2.5, `target_height=SUCCESS_HEIGHT≈0.58m`) is the binary success
+signal: returns 1.0 when both feet are in contact with the ground AND the
+pelvis is above target height, else 0.0. This prevents reward hacking
+where the robot achieves height without actually standing on its feet
+(e.g. propping on knees or hands). Mirrors HumanUP's `stand_on_feet` term.
 
-**`body_up`** (`src/tasks/get_up/mdp/rewards.py::body_up_exp`, weight
-0.25) returns `clamp(-projected_gravity_b[:, 2], 0, 1)`: 1.0 when
-perfectly upright (gravity points straight down in body frame,
-`pg_z=-1`), 0.0 when sideways or upside down. This is the orientation
-complement to `base_height` — a smooth, bounded, hyperparameter-free
-upright signal. The small weight (0.25) makes it a shaping term rather
-than a dominant signal; `upright` (weight 1.0) handles the primary
-orientation penalty.
+**`upper_body_upright`** (`src/tasks/get_up/mdp/rewards.py::upper_body_upright`,
+weight 3.0, `std=√0.2`, `body_name="thorax"`, added v1.7) rewards the
+*thorax* body's own verticality — same projected-gravity math as the
+stock `upright` class, but targeted at the thorax instead of the pelvis,
+and gated on `stand_on_feet`'s exact condition (both feet contact + height
+above `SUCCESS_HEIGHT`) rather than always-on. Added because v1.4 stood up
+reliably but stayed bent forward at the waist: `task_progress`'s
+orientation component reads the *pelvis*'s orientation, and the pelvis can
+be near-vertical while `pitch_waist_joint` folds the thorax forward above
+it — a blind spot no other term in the v1.4 stack covered. v1.5/v1.6
+(reverted — see version history below) tried to fix this indirectly by
+penalizing the hand propping up the bend instead of rewarding the posture
+directly; `upper_body_upright` is the direct fix. Gating it on the
+standing condition (not just height) keeps it from fighting the rising
+motion, where the torso legitimately needs to pass through bent
+intermediate poses (e.g. `hand_supported_rise`'s push-up phase) — same
+conditional-style principle `stand_still_pose` already uses below.
+
+**`shank_vertical`** and **`feet_level`**
+(`src/tasks/get_up/mdp/rewards.py`, weights 2.0 / 2.5, added v1.2) are
+HoST's `style_shank_orientation` / `style_ground_parallel`: reward a
+stable, feet-planted crouch as the intermediate pose to rise from, gated
+to the rising phase (`shank_vertical`) or to `SUCCESS_HEIGHT`
+(`feet_level`, gated higher than `shank_vertical` so it doesn't fight the
+v1.3 asymmetric lunge step described below).
+
+**`height_progress`** and **`feet_force_progress`** (weights 2.0 / 1.0,
+added v1.2 as "Step 1" of the research-backed plan below) are HumanUP's
+`r_Δheight` / `r_Δfeet_contact_forces`: dense rewards for the pelvis
+rising and ground-reaction force increasing step-to-step, giving gradient
+far from the target where `task_progress`'s saturating tolerance shape is
+~flat — exactly the dead zone the kneeling trap exploited.
+
+**`hand_supported_rise`** and **`foot_advance`** (weights 2.0 / 1.5, added
+v1.3) reward a human-like hands-then-lunge get-up strategy observed in
+v1.2 rollouts (which converged to face-down, arms/legs spread, and
+stalled): push the torso up while both hands are planted
+(`hand_supported_rise`), then step one foot forward while a hand is still
+down to pivot upright (`foot_advance`).
 
 ### Conditional style — the key insight from HumanUP/HoST
 
@@ -139,6 +191,44 @@ involve terminating the episode early (e.g. collapsing to trigger
 reset). The large magnitude (-500) makes it the dominant signal if the
 robot is about to terminate — the policy should avoid termination at
 all costs.
+
+## Version history and training campaign log
+
+Every reward change to this task gets its own commit (`v1.N: ...`) so a
+checkpoint is always traceable to the exact reward set that produced it.
+This table is the running record of what each version changed and how it
+actually performed — kept up to date going forward so a future tuning pass
+starts from here instead of re-discovering the same failure modes (the
+same discipline `soarm_mjlab/docs/reach_training_debug_log.md` follows for
+that package's Reach task).
+
+| Version | Change | Outcome |
+|---|---|---|
+| v1.1 | Additive `base_height_exp` + stock `upright` + `body_up_exp` | **Kneeling trap.** Reward climbed then flatlined by 4% of the training budget; `upright` pinned near ceiling while genuine fallen-recovery stayed at 0%. See "Confirmed: the kneeling trap" below. |
+| v1.1 (fix attempt) | Standing-probability curriculum (mix standing + fallen resets) | **Insufficient alone.** Logged metrics improved, but replaying a checkpoint from a *forced-fallen* reset (curriculum bypassed) showed zero recovery — the metrics tracked curriculum-assisted resets, not a growing recovery skill. |
+| v1.2 | Replaced the v1.1 stack with `task_progress` (multiplicative height×orientation, HoST-verified) + `shank_vertical`/`feet_level` (stable-base style) + `height_progress`/`feet_force_progress` (HumanUP delta-progress, "Step 1"/"Step 2" below) | Fixed the kneeling trap structurally (multiplicative reward can't be maxed on orientation alone). Rollouts converged to a *different* stuck point: face-down, arms/legs spread. |
+| v1.3 | `hand_supported_rise` + `foot_advance` — reward a human-like hands-then-lunge strategy (push up on both hands, step one foot forward, pivot upright) | Unstuck v1.2's face-down convergence; policy started reaching standing height via a recognizable get-up motion. |
+| v1.4 | "Step 3" assistive decaying lift force (`mdp/events.py::assistive_lift_force`) — HoST-style vertical pelvis force while near-vertical, annealing to 0 by step 300k | **10,000-iteration run** (W&B `c3b1ytc6`): `standing_success` climbed to a strong finish, 0.82 at the final logged step (noisy mid-run, dipping to ~0.03 around 75% through, but recovering). **Independently re-verified** against `model_9999.pt` on `scripts/eval_fallen_recovery.py`'s dedicated (curriculum-bypassed) harness: **100% genuine recovery (60/60)**, peak height mean 0.805m, **+0.295m over a matched zero-action baseline** (0.510m) — a real, large skill signal, not reset-physics noise. Video-confirmed (genuinely-fallen reset, `--no-terminations`, 400 steps): reliably reaches a wide, stable two-foot stance by ~2s in and holds it — but the torso is visibly hunched/bent forward with an arm raised, not a straight standing pose, matching the "bent forward at the waist" finding. This is the checkpoint v1.7 is built on top of. |
+| v1.5 *(reverted)* | `hands_off_ground` penalty (weight -3.0) for hand contact once standing; capped `foot_advance` at `SUCCESS_HEIGHT` | **Collapsed.** 15,000-iteration run (W&B `1q3ugie0`): `standing_success` fell to **0.0006 at the final step** — essentially zero — while `Episode_Reward/foot_advance` climbed toward its ceiling throughout, a camping exploit the height cap itself created (park the foot forward, keep a hand down, stay just below `SUCCESS_HEIGHT`, collect free reward forever; crossing the gate now cost guaranteed income it didn't cost before). |
+| v1.6 *(reverted)* | Rewrote `foot_advance` as a delta-progress term (rewards the *increase* in forward offset, not the maintained condition) — closes the v1.5 camping exploit structurally | Closed the exploit (CPU-verified: cumulative zero-action reward bounded at ~0.2–1.5 over 300 steps, vs. v1.5's unbounded ~300) but **did not fix the underlying task**. Trained to a full **15,000-iteration campaign** (W&B `jgn5np4w`, preceded by a 1,500-iteration burst check, `b7eiotwx`, `standing_success≈0.18`, that looked promising enough to justify the full run) — training-log `standing_success` peaked early at 0.54 (iteration ~2,645, ~18% through), degraded through the middle (~0.04–0.06 for iterations 6,000–12,000), bottomed near-zero around iteration 13,500, and only partially recovered to 0.16 by the end. **Independently re-verified** against `model_14999.pt` on `scripts/eval_fallen_recovery.py`: **1.7% genuine recovery (1/60)**, and a **+0.019m peak-height delta over the zero-action baseline — within noise, i.e. statistically indistinguishable from doing nothing.** Video-confirmed (same genuinely-fallen-reset setup as v1.4 above): across the full 8s rollout the robot stays sprawled flat, limbs splayed outward, never rising — this is not a posture problem, it essentially never gets up from a genuine fall at all. The 0.16 end-of-training W&B metric — averaged over a mix of curriculum-assisted and genuinely-fallen resets during training — was actively misleading on its own, exactly the trap "Validation principle: never trust logged episode averages alone" (below) warns about. |
+| **v1.7** *(current)* | **Reverted v1.5/v1.6 back to v1.4**, added `upper_body_upright` (weight 3.0) — rewards the thorax's own verticality directly, gated on `stand_on_feet`'s condition | Addresses the v1.4 finding at its source instead of through the hand-contact proxy v1.5/v1.6 used. CPU-verified: fires (~0.93–0.997) once both feet are planted and the pelvis is at standing height, exactly zero before that gate opens. **Not yet training-verified** — next step is the tiered validation strategy below (CPU check ✅ done → GPU burst → full campaign) before trusting it beyond the CPU check. |
+
+Takeaway pattern across v1.4→v1.6: two consecutive versions (v1.5, v1.6)
+fixed real problems they found (an unpenalized hand, then an exploit their
+own fix created) without ever fixing the problem that started the
+investigation — and each fix cost real training stability, not just wasted
+effort: v1.5 collapsed `standing_success` to zero, and v1.6, despite
+closing v1.5's specific exploit, regressed all the way from v1.4's 100%
+genuine recovery to 1.7% — indistinguishable from a policy that does
+nothing. Its own training-log metric (0.16 at the final iteration) actively
+understated how bad this was, since that metric is contaminated by
+curriculum-assisted resets; the dedicated eval harness and direct video
+inspection are what caught it. Neither v1.5 nor v1.6 added a reward for the
+actual target behavior (a straight upper body) — only penalties/patches
+around its absence, and in v1.6's case a patch that came at a real cost to
+the underlying recovery skill. v1.7 breaks that pattern by reinforcing the
+goal state directly, on top of the v1.4 checkpoint that is — as of this
+verification — still the best one this task has produced.
 
 ## Observation space
 
@@ -530,6 +620,16 @@ dollars of GPU time, not after a full multi-hour rented run, which is
 exactly how the standing-probability curriculum's failure was discovered
 the expensive way.
 
+**Status: Steps 1–3 implemented** (v1.2: Steps 1 & 2, as `height_progress`/
+`feet_force_progress` and the `shank_vertical`/`feet_level`/`foot_advance`
+height gates; v1.4: Step 3, as `assistive_lift_force`) — see "Version
+history and training campaign log" above for how each performed. Steps 4–6
+remain open; none have been attempted. The bent-waist problem v1.4 exposed
+turned out not to need any of Steps 4-6 — it needed a direct upper-body
+reward, added in v1.7 (see version history), a different kind of gap than
+this roadmap's items were scoped for (which target *reaching* standing
+height at all, not standing posture once there).
+
 ### Validation principle: never trust logged episode averages alone
 
 The standing-probability curriculum's logged `standing_success`/
@@ -563,7 +663,7 @@ before it's trusted. Concretely:
   (c) only once (b) shows the eval-harness numbers trending up does a full
   `num_envs=4096`, `max_iterations=15001` rented-GPU run get justified.
 
-### Step 1 — Height & contact-force progress reward
+### Step 1 — Height & contact-force progress reward — ✅ Done (v1.2)
 
 **Highest priority.** Add to `src/tasks/get_up/mdp/rewards.py` as a
 class-based term (the officially supported stateful pattern — see
@@ -613,7 +713,7 @@ naturally-settling fallen pose) and confirm the reward is positive while
 height increases, zero while it's flat or decreasing. Then the tiered
 compute strategy above, gated on Step 0's harness.
 
-### Step 2 — Height-staged reward gating
+### Step 2 — Height-staged reward gating — ✅ Done (v1.2)
 
 **Second priority**, same file. `upright` is a stock **class-based** term
 (`mjlab.tasks.velocity.mdp.rewards.upright`, auto-instantiated by
@@ -644,7 +744,7 @@ above threshold. Then combine with Step 1 and run the same tiered compute
 strategy — this is the first point where Step 0's harness should show a
 real signal difference from the original run.
 
-### Step 3 — Assistive decaying lift force
+### Step 3 — Assistive decaying lift force — ✅ Done (v1.4)
 
 **Most direct fix for the ground→standing transition, moderate lift.**
 New "step"-mode `EventTermCfg` (runs every `env.step()`, not just on
@@ -681,7 +781,7 @@ to need a few retuning passes at the cheap-GPU-burst tier before a full
 run is justified — track how the Step 0 harness's peak-height distribution
 shifts as `max_force` and `anneal_steps` change.
 
-### Step 4 — Multi-critic reward architecture
+### Step 4 — Multi-critic reward architecture — not attempted
 
 **Biggest lift — confirmed to need real engineering, not a config
 change.** Checked directly: `rsl_rl.algorithms.ppo.PPO` (the algorithm
@@ -700,7 +800,7 @@ first (a plain unit test, no simulation needed) before wiring it into the
 full training loop, since debugging it live against a 4096-env rollout is
 far more expensive than debugging it against fixed synthetic data.
 
-### Step 5 — Two-stage discover → refine training
+### Step 5 — Two-stage discover → refine training — not attempted
 
 **Structural process change, most proven fix in the literature, most
 work.** Only pursue if Steps 1-4 don't produce a working single-stage
@@ -714,7 +814,7 @@ DoF/body tracking reward against that reference (mirroring HumanUP's
 `r_tracking_DoF + r_tracking_body`) plus this doc's full regularization
 table, training a second policy to imitate a slowed-down version of it.
 
-### Step 6 — Pre-simulated drop-and-settle pose pool
+### Step 6 — Pre-simulated drop-and-settle pose pool — not attempted
 
 **Independent polish, not a fix for the core exploration problem —
 sequence in parallel with the above or last.** Replaces the live
