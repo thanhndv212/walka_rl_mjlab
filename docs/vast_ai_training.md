@@ -28,6 +28,31 @@ rented box only ever needs `walka_rl_mjlab` itself.
   (<https://github.com/thanhndv212/walka_rl_mjlab>), no deploy key or token
   needed to clone it.
 
+## Storage strategy: W&B is short-term, Hugging Face Hub is long-term
+
+Two different jobs, two different tools — don't ask W&B to do both:
+
+- **W&B**: live metrics (reward curves, termination rates, everything
+  `Episode_Reward/*`/`Episode_Metrics/*`) plus a *rolling* set of
+  checkpoints for debugging a run in progress or resuming after preemption.
+  W&B's free tier has a hard **artifact-storage** quota (separate from, and
+  much smaller than, its scalar-logging limits) — every checkpoint save
+  uploads a full `model_<N>.pt` (a few MB), and at the old default
+  (`save_interval=100`) a single 15,000-iteration run uploads ~150 of them.
+  A handful of full-length runs exhausted the quota outright. `rl_cfg.py`'s
+  `save_interval` is now 1000-1500 (still gives enough of a trail to see a
+  run's trajectory, ~10-15 checkpoints instead of ~100-150) — don't set it
+  back below a few hundred on a long run without a plan for the quota.
+- **Hugging Face Hub**: the actual long-term archive. `scripts/push_to_hub.py`
+  uploads the ONNX policy + raw checkpoint + configs + an auto-generated
+  model card to a permanent HF model repo — free, no meaningful quota at
+  these volumes, never expires. This is where a checkpoint should land once
+  it's actually cleared the promotion bar (step 7) and is worth keeping;
+  nothing before that point needs to survive past the W&B run itself.
+  One-time setup: `uv run hf auth login` (paste a token from
+  <https://huggingface.co/settings/tokens>). Add `--private` to keep a repo
+  unlisted.
+
 ## 1. Rent an instance
 
 On the [vast.ai console](https://cloud.vast.ai/create/), search offers and
@@ -64,11 +89,12 @@ pick:
 - **Disk**: 30GB is comfortable (repo + meshes are a few MB; the rest is
   torch/CUDA wheels + checkpoints).
 - **Interruptible vs. on-demand**: interruptible is cheaper but can be
-  preempted; checkpoints save every `save_interval` iterations (100, see
-  `rl_cfg.py`) and training resumes from the last one with
-  `--agent.resume`. **Preemption can be indefinite** — if a restart queues
-  for a long time, rent a fresh instance instead (the repo re-clones and
-  `uv sync`s in minutes) and `vastai destroy instance <id> -y` the stuck one.
+  preempted; checkpoints save every `save_interval` iterations (1000-1500,
+  see `rl_cfg.py` — deliberately coarse, see "Storage strategy" below) and
+  training resumes from the last one with `--agent.resume`. **Preemption
+  can be indefinite** — if a restart queues for a long time, rent a fresh
+  instance instead (the repo re-clones and `uv sync`s in minutes) and
+  `vastai destroy instance <id> -y` the stuck one.
 - **Check `disk_bw`** when comparing offers, not just price/GPU — a host
   with low disk bandwidth can make `uv sync --extra cu128`'s multi-GB
   torch/CUDA wheel unpack take 30+ minutes even on a fast network link.
@@ -217,6 +243,12 @@ generates a model card with training provenance, and pushes
 or existing HF model repo. Add `--private` to keep it unlisted. If you
 already have the run directory locally, `--run-dir <path>` skips the W&B
 download.
+
+For a non-velocity task (e.g. `Walka-GetUp`, see docs/get_up_task.md), also
+pass `--experiment-name <whatever --agent.experiment-name the run used>`
+(the velocity task's `walka_velocity` default won't match) and
+`--task-title`/`--task-description` so the model card describes the right
+task instead of velocity tracking.
 
 ## 11. Shut the instance down
 

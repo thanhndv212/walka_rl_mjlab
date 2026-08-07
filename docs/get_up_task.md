@@ -755,3 +755,26 @@ uv run python scripts/play.py Walka-GetUp --checkpoint-file logs/rsl_rl/walka_ge
 Training is expected to take longer than the velocity task (~2h on RTX
 4090 for velocity) due to the harder exploration problem. With
 `num_envs=4096` and `max_iterations=15001`, expect ~3-4h on an RTX 4090.
+
+### Storage: W&B is short-term, Hugging Face Hub is long-term
+
+See docs/vast_ai_training.md's "Storage strategy" section for the full
+reasoning. In short: W&B's checkpoint uploads (every `save_interval`
+iterations) have a hard artifact-storage quota that a handful of
+15,000-iteration runs at the old default exhausted outright — `rl_cfg.py`
+now saves every 1500 iterations instead of 100. For a checkpoint actually
+worth keeping past the run itself, push it to Hugging Face Hub:
+
+```bash
+uv run python scripts/push_to_hub.py \
+    --repo-id <your-hf-username>/walka-get-up \
+    --wandb-run-path <entity>/<project>/<run_id> \
+    --experiment-name <the --agent.experiment-name that run used> \
+    --task-title "Walka get-up" \
+    --task-description "For a Walka biped fall-recovery task: the policy commands Walka to rise from a fallen pose to standing."
+```
+
+`--experiment-name` must match the run's actual `--agent.experiment-name`
+(this session used distinct per-run names like `walka_get_up_v15_15k`, not
+a single shared one) — it's how the script finds the right local
+`logs/rsl_rl/<experiment_name>/` staging directory when pulling from W&B.

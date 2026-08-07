@@ -35,7 +35,13 @@ def walka_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
             max_grad_norm=1.0,
         ),
         experiment_name="walka_velocity",
-        save_interval=100,
+        # 1000 (not 100): every save_interval uploads a full checkpoint to
+        # W&B, which has a hard artifact-storage quota -- a handful of
+        # full-length runs at the old 100 (~100 checkpoints/run) exhausted
+        # it. W&B is short-term tracking; scripts/push_to_hub.py is the
+        # long-term store for a checkpoint actually worth keeping (see
+        # docs/vast_ai_training.md).
+        save_interval=1000,
         num_steps_per_env=24,
         max_iterations=10001,
     )
