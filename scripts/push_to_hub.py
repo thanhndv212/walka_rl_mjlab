@@ -1,7 +1,14 @@
-"""Publish a promoted Walka velocity checkpoint to the Hugging Face Hub.
+"""Publish a promoted Walka checkpoint to the Hugging Face Hub -- the
+long-term model store. W&B (see docs/vast_ai_training.md /
+docs/get_up_task.md) is short-term: live metrics + a rolling window of
+recent checkpoints for debugging a run in progress, and it has a hard
+artifact-storage quota that a handful of long training runs (each
+uploading a full checkpoint every save_interval iterations) can exhaust.
+Nothing pushed here ever expires or counts against that quota -- this is
+where a checkpoint should land once it's actually worth keeping.
 
 Deliberately a separate, manual step — not automatic on every training
-checkpoint (unlike the W&B upload in VelocityOnPolicyRunner.save). Only a
+checkpoint (unlike the W&B upload in *OnPolicyRunner.save). Only a
 checkpoint that's cleared the promotion bar (see
 docs/vast_ai_training.md) should get published under a public model repo.
 
@@ -11,9 +18,14 @@ Usage:
     uv run python scripts/push_to_hub.py --repo-id <user>/walka-velocity-flat \\
         --run-dir logs/rsl_rl/walka_velocity/2026-07-29_12-00-00
 
-    # From a W&B run (downloads the checkpoint + ONNX export first):
+    # From a W&B run (downloads the checkpoint + ONNX export first) --
+    # --experiment-name must match whatever --agent.experiment-name the
+    # run was launched with, so the download lands in the matching local
+    # log-root convention (default "walka_velocity"; e.g.
+    # "walka_get_up_v15_15k" for a get-up run launched under that name):
     uv run python scripts/push_to_hub.py --repo-id <user>/walka-velocity-flat \\
-        --wandb-run-path <entity>/<project>/<run_id>
+        --wandb-run-path <entity>/<project>/<run_id> \\
+        --experiment-name walka_velocity
 
 `Walka-Flat` and `Walka-Rough` share the same log root
 (`logs/rsl_rl/walka_velocity/`, both use `experiment_name="walka_velocity"`
@@ -36,12 +48,10 @@ import tyro
 import yaml
 from huggingface_hub import HfApi, ModelCard, ModelCardData
 
-_CARD_BODY_TEMPLATE = """# Walka velocity — PPO policy
+_CARD_BODY_TEMPLATE = """# {task_title} — PPO policy
 
 Trained with [walka_rl_mjlab](https://github.com/thanhndv212/walka_rl_mjlab)
-(mjlab + RSL-RL PPO) for a Walka biped velocity-tracking task: the policy
-commands Walka's 24 joints to track a randomly sampled linear/angular base
-velocity command, on either flat ground or randomized rough terrain.
+(mjlab + RSL-RL PPO). {task_description}
 
 ## Files
 
@@ -83,8 +93,27 @@ class PushConfig:
     """W&B run path 'entity/project/run_id' to pull the checkpoint from instead."""
     wandb_checkpoint_name: str | None = None
     """Specific checkpoint filename within the W&B run (default: latest)."""
+    experiment_name: str = "walka_velocity"
+    """Log-root subdirectory under logs/rsl_rl/ to stage the W&B download
+    into (only used with --wandb-run-path). Matches whatever
+    --agent.experiment-name the run was launched with -- 'walka_velocity'
+    for both Walka-Flat/Walka-Rough (they share one log root by convention,
+    see module docstring), but e.g. 'walka_get_up_v15_15k' for a get-up run
+    launched with that experiment name."""
+    task_title: str = "Walka velocity"
+    """Short title for the model card's H1, e.g. 'Walka velocity' or
+    'Walka get-up'."""
+    task_description: str = (
+        "For a Walka biped velocity-tracking task: the policy commands "
+        "Walka's 24 joints to track a randomly sampled linear/angular base "
+        "velocity command, on either flat ground or randomized rough terrain."
+    )
+    """One or two sentences describing the task, substituted into the model
+    card body. Override for non-velocity tasks -- the default describes
+    velocity tracking specifically and would be wrong on e.g. a get-up
+    checkpoint."""
     private: bool = False
-    commit_message: str = "Upload Walka velocity checkpoint"
+    commit_message: str = "Upload Walka checkpoint"
 
 
 def _latest_checkpoint(run_dir: Path) -> Path | None:
@@ -110,10 +139,11 @@ def _resolve_run_dir(cfg: PushConfig) -> Path:
 
     # From W&B: the .pt checkpoint download is covered by an existing mjlab
     # utility; the .onnx export and configs aren't, so fetched here the same way.
-    import wandb
     from mjlab.utils.os import get_wandb_checkpoint_path
 
-    log_root = Path("logs") / "rsl_rl" / "walka_velocity"
+    import wandb
+
+    log_root = Path("logs") / "rsl_rl" / cfg.experiment_name
     checkpoint_path, _ = get_wandb_checkpoint_path(
         log_root, Path(cfg.wandb_run_path), cfg.wandb_checkpoint_name
     )
@@ -162,6 +192,8 @@ def build_model_card(run_dir: Path, cfg: PushConfig) -> str:
     )
     wandb_line = f"- W&B run: `{cfg.wandb_run_path}`" if cfg.wandb_run_path else ""
     body = _CARD_BODY_TEMPLATE.format(
+        task_title=cfg.task_title,
+        task_description=cfg.task_description,
         max_iterations=max_iterations,
         num_envs=num_envs,
         commit_hash=commit_hash,
