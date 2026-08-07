@@ -227,26 +227,31 @@ class hand_supported_rise(ManagerTermBase):
 
 
 class foot_advance(ManagerTermBase):
-    """Reward one foot stepping forward of the pelvis while at least one
-    hand is still down -- the asymmetric lunge that bridges a
-    hand-supported push-up to standing (plant hands, step one foot forward
-    and under the hips, push up through that leg). "Forward" is measured in
-    the pelvis's current *yaw-only* heading frame (mjlab's ``yaw_quat``),
-    not a fixed world axis, since yaw is randomized at reset -- ignoring
-    current roll/pitch tilt matters here because the pelvis is usually
-    still tilted during this exact phase.
+    """Dense reward for a foot's forward offset (in the pelvis's current
+    *yaw-only* heading frame, mjlab's ``yaw_quat`` -- not a fixed world
+    axis, since yaw is randomized at reset) *increasing* -- the asymmetric
+    lunge step that bridges a hand-supported push-up to standing, rewarded
+    as progress rather than a maintained condition.
 
-    Gated on hand contact AND ``h < success_height`` (v1.5 fix): v1.4's
-    hand-contact-only gate had no upper height bound, so once standing at
-    full height with a foot happening to satisfy the forward-offset
-    condition, this term kept paying out exactly as strongly as during the
-    actual rise -- an unbounded incentive to keep a hand on the ground
-    indefinitely. Empirically confirmed via video (docs/get_up_task.md):
-    the v1.4 policy stood on both feet but kept one arm on the ground,
-    bent forward at the waist, well past genuine standing height. Capping
-    this gate the same way ``feet_level``/``shank_vertical`` already are
-    removes the unbounded incentive; see also ``hands_off_ground`` below
-    for the direct complementary penalty.
+    v1.5's static-condition version (pay ``tolerance(offset > target)``
+    every step the condition held, gated on hand contact and
+    ``h < success_height``) could be held indefinitely for free once
+    discovered: park the foot forward, keep a hand down, stay just below
+    success_height, collect the reward every single step forever. Confirmed
+    empirically via a 15,000-iteration run (docs/get_up_task.md v1.5
+    postmortem): standing_success peaked at 0.27 around iteration ~2000,
+    then collapsed to ~0.001 by iteration 15000, while foot_advance's own
+    logged reward climbed monotonically to its ceiling the entire time --
+    a camping exploit, not learned progress. The v1.5 fix that added the
+    success_height gate is what created this specific exploit: before that,
+    standing taller didn't cost this term anything, so there was no reward
+    incentive to avoid crossing the gate; after, crossing it meant losing
+    guaranteed income, so the policy learned to just not cross it.
+
+    Mirrors ``height_progress``/``hand_supported_rise``'s delta pattern
+    instead, which don't have this failure mode: holding a fixed position,
+    gated or not, earns a progress-reward exactly zero, so there is no
+    "camp here forever" option structurally available.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
@@ -255,14 +260,19 @@ class foot_advance(ManagerTermBase):
         asset = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
         foot_ids, _ = asset.find_bodies(list(foot_names), preserve_order=True)
         self._foot_ids = foot_ids
+        self._prev_offset = torch.zeros(env.num_envs, device=env.device)
+        self._has_prev = torch.zeros(
+            env.num_envs, dtype=torch.bool, device=env.device
+        )
+
+    def reset(self, env_ids: torch.Tensor) -> None:
+        self._has_prev[env_ids] = False
 
     def __call__(
         self,
         env: ManagerBasedRlEnv,
         hand_sensor_name: str,
         success_height: float,
-        forward_target: float = 0.15,
-        forward_margin: float = 0.1,
         foot_body_names: tuple[str, str] = ("footL", "footR"),
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -281,8 +291,15 @@ class foot_advance(ManagerTermBase):
         )
         forward_offset = quat_apply_inverse(heading_expanded, rel)[..., 0]
         most_advanced = forward_offset.max(dim=-1).values
-        reward = _tolerance(most_advanced, forward_target, forward_margin)
-        return reward * any_hand.float() * (h < success_height).float()
+
+        delta = torch.where(
+            self._has_prev,
+            (most_advanced - self._prev_offset).clamp(min=0.0),
+            torch.zeros_like(most_advanced),
+        )
+        self._prev_offset = most_advanced.clone()
+        self._has_prev = torch.ones_like(self._has_prev)
+        return delta * any_hand.float() * (h < success_height).float()
 
 
 def hands_off_ground(

@@ -354,11 +354,15 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # v1.3 hands-then-lunge get-up strategy (observed in v1.2 rollouts
     # converging to face-down, arms/legs spread -- see docs/get_up_task.md):
     #   hand_supported_rise (weight 2.0) — push torso up while both hands
-    #   planted; foot_advance (weight 1.5, capped at SUCCESS_HEIGHT since
-    #   v1.5) — one foot steps forward while a hand is still down
+    #   planted; foot_advance (weight 2.0) — Delta-progress on a foot's
+    #   forward offset while a hand is still down, capped at SUCCESS_HEIGHT
     # v1.5: hands_off_ground (weight -3.0) — penalize hand-ground contact
     # once above SUCCESS_HEIGHT; v1.4 kept one hand down indefinitely once
-    # standing, bent forward at the waist, since nothing penalized it
+    # standing, bent forward at the waist, since nothing penalized it.
+    # v1.6: foot_advance rewritten as a Delta-progress term (was a static-
+    # condition reward) after a 15k-iteration run showed the v1.5 version
+    # could be camped indefinitely just below SUCCESS_HEIGHT for free
+    # reward -- standing_success peaked at 0.27 then collapsed to ~0.001.
     # Conditional style (zeroed during rising, active near standing):
     #   stand_still_pose — penalize joint deviation from default (weight -0.5)
     # Regularization:
@@ -420,7 +424,7 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         ),
         "foot_advance": RewardTermCfg(
             func=mdp.foot_advance,
-            weight=1.5,
+            weight=2.0,
             params={
                 "hand_sensor_name": "hands_ground_contact",
                 "success_height": SUCCESS_HEIGHT,
