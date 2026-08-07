@@ -354,8 +354,11 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     # v1.3 hands-then-lunge get-up strategy (observed in v1.2 rollouts
     # converging to face-down, arms/legs spread -- see docs/get_up_task.md):
     #   hand_supported_rise (weight 2.0) — push torso up while both hands
-    #   planted; foot_advance (weight 1.5) — one foot steps forward while a
-    #   hand is still down
+    #   planted; foot_advance (weight 1.5, capped at SUCCESS_HEIGHT since
+    #   v1.5) — one foot steps forward while a hand is still down
+    # v1.5: hands_off_ground (weight -3.0) — penalize hand-ground contact
+    # once above SUCCESS_HEIGHT; v1.4 kept one hand down indefinitely once
+    # standing, bent forward at the waist, since nothing penalized it
     # Conditional style (zeroed during rising, active near standing):
     #   stand_still_pose — penalize joint deviation from default (weight -0.5)
     # Regularization:
@@ -418,7 +421,27 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
         "foot_advance": RewardTermCfg(
             func=mdp.foot_advance,
             weight=1.5,
-            params={"hand_sensor_name": "hands_ground_contact"},
+            params={
+                "hand_sensor_name": "hands_ground_contact",
+                "success_height": SUCCESS_HEIGHT,
+            },
+        ),
+        # v1.5: v1.4 (10k-iteration run) achieved 100% genuine recovery but
+        # empirically kept one hand on the ground indefinitely once
+        # standing, bent forward at the waist -- nothing in v1.4's stack
+        # ever penalized that (see docs/get_up_task.md). foot_advance above
+        # is now capped at SUCCESS_HEIGHT (had no upper bound before); this
+        # term directly penalizes the behavior instead of just removing its
+        # incentive. Weight set slightly above stand_on_feet's (2.5) so the
+        # penalty decisively outweighs whatever balance benefit a hand on
+        # the ground provides.
+        "hands_off_ground": RewardTermCfg(
+            func=mdp.hands_off_ground,
+            weight=-3.0,
+            params={
+                "sensor_name": "hands_ground_contact",
+                "success_height": SUCCESS_HEIGHT,
+            },
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1),
