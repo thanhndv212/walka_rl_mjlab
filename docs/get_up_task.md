@@ -5,24 +5,27 @@ the design follows from research on humanoid fall recovery (HumanUP,
 HoST, Learning to Get Up, UHG). Most terms are custom
 (`src/tasks/get_up/mdp/`); the stock mjlab terms used are noted inline.
 
-**Status (post-v1.7 revert):** v1.4 (W&B `c3b1ytc6`, `model_9999.pt`) is
-still the best checkpoint this task has produced — **100% genuine
-recovery** from genuinely fallen poses (`scripts/eval_fallen_recovery.py`)
-— but its standing pose is wrong: a bent-forward waist, propped by a hand
-left on the ground. **Three consecutive attempts to fix that posture have
-now failed at full scale**: v1.5 (hand-contact penalty) collapsed to ~0%
-recovery; v1.6 (fixed v1.5's specific exploit) regressed to 1.7%; v1.7
-(reinforces upper-body verticality directly instead of penalizing hands)
-regressed further to **0.0% genuine recovery** in a full 10,000-iteration/
-4096-env campaign matching v1.4's own scale — worse than v1.6, and a
-*monotonic* decline from an early peak rather than v1.4's dip-then-recover
-shape. **v1.5/v1.6/v1.7 are all reverted in code** — the reward set is
-back to exactly v1.4's. The bent-waist posture problem remains
-unsolved; a fresh v1.4 rerun at `max_iterations=20000` (double v1.4's
-original 10k, same reward set, no code change) is in progress to see
-whether more training alone changes the standing posture, before trying
-another reward-side fix. See "Version history and training campaign log"
-below for the full log, numbers, and how each version was verified.
+**Status (post-v1.4-20k-rerun):** the reward set in code is back to
+exactly v1.4's (v1.5/v1.6/v1.7 all reverted). **The original v1.4
+checkpoint (W&B `c3b1ytc6`, `model_9999.pt`, 100% genuine recovery) has
+not been reproduced since**, and this is now the central open question,
+not the bent-waist posture: v1.5, v1.6, and v1.7 all failed to reach
+genuine recovery at full scale (~0%, 1.7%, 0.0%), and a fresh **v1.4
+rerun at `max_iterations=20000`** (same code, double the iterations, W&B
+`yzkba46u`) *also* failed — **0.0% genuine recovery**, peaking early
+(iteration 1159, ~6% through, 0.51) then plateauing at 0.03–0.09 for the
+remaining 94% of training with no late recovery, despite ~4x more
+post-curriculum training time than the original run had. **Four out of
+five full-scale runs of get-up reward code (v1.5, v1.6, v1.7, and now a
+second v1.4 run) have failed to reach genuine recovery; only the original
+`c3b1ytc6` run succeeded.** The leading working hypothesis is that
+`c3b1ytc6`'s 100% was seed/run-dependent rather than a robust property of
+the v1.4 reward design — untested against alternatives (a third v1.4 run
+to check reproducibility, or inspecting what made that specific run's
+trajectory different). The bent-waist posture problem is now secondary:
+it can't be worked on further until a checkpoint that actually stands is
+reproduced. See "Version history and training campaign log" below for the
+full log, numbers, and how each version was verified.
 
 ## Overview
 
@@ -217,7 +220,7 @@ that package's Reach task).
 | v1.6 *(reverted)* | Rewrote `foot_advance` as a delta-progress term (rewards the *increase* in forward offset, not the maintained condition) — closes the v1.5 camping exploit structurally | Closed the exploit (CPU-verified: cumulative zero-action reward bounded at ~0.2–1.5 over 300 steps, vs. v1.5's unbounded ~300) but **did not fix the underlying task**. Trained to a full **15,000-iteration campaign** (W&B `jgn5np4w`, preceded by a 1,500-iteration burst check, `b7eiotwx`, `standing_success≈0.18`, that looked promising enough to justify the full run) — training-log `standing_success` peaked early at 0.54 (iteration ~2,645, ~18% through), degraded through the middle (~0.04–0.06 for iterations 6,000–12,000), bottomed near-zero around iteration 13,500, and only partially recovered to 0.16 by the end. **Independently re-verified** against `model_14999.pt` on `scripts/eval_fallen_recovery.py`: **1.7% genuine recovery (1/60)**, and a **+0.019m peak-height delta over the zero-action baseline — within noise, i.e. statistically indistinguishable from doing nothing.** Video-confirmed (same genuinely-fallen-reset setup as v1.4 above): across the full 8s rollout the robot stays sprawled flat, limbs splayed outward, never rising — this is not a posture problem, it essentially never gets up from a genuine fall at all. The 0.16 end-of-training W&B metric — averaged over a mix of curriculum-assisted and genuinely-fallen resets during training — was actively misleading on its own, exactly the trap "Validation principle: never trust logged episode averages alone" (below) warns about. |
 | v1.7 *(reverted)* | **Reverted v1.5/v1.6 back to v1.4**, added `upper_body_upright` (weight 3.0) — rewards the thorax's own verticality directly, gated on `stand_on_feet`'s condition | Addresses the v1.4 finding at its source instead of through the hand-contact proxy v1.5/v1.6 used. CPU-verified operationally sound (fires ~0.93–0.997 once standing, exactly zero before). **GPU burst** (commit `55907f4`, W&B `td3tfmgr`, `num_envs=1024`, 1500 iterations, ~$0.15): operationally clean, `upper_body_upright` climbed to 1.45 alongside `stand_on_feet`/`task_progress`, no crashes — but too short (36.9M env-steps) to say anything about real recovery skill (1.7% genuine recovery, within noise, as expected at that scale). **Full campaign** (W&B `iw6h43da`, `num_envs=4096`, 10,000 iterations — v1.4-matching scale, ~2h21m, ~$0.85–0.90 on a rented RTX 4090): **a clear regression, not inconclusive this time.** `standing_success` peaked early (iteration 789, ~8% through, 0.60) then declined *monotonically* for the entire remaining 92% of training, ending at 0.009 — unlike v1.4's own dip-then-recover shape (low at 75%, 0.82 by the end) and unlike v1.6's partial-recovery shape (0.16 by the end). `scripts/eval_fallen_recovery.py` against the final checkpoint (`model_9999.pt`): **0.0% genuine recovery (0/60)**, +0.014m peak-height delta over the zero-action baseline — worse than v1.6's 1.7%, statistically indistinguishable from doing nothing. **v1.4 remains the best checkpoint this task has produced.** Open question, not yet root-caused: gating `upper_body_upright` on `stand_on_feet`'s exact condition creates a reward landscape where a large weight-3.0 term pays out only inside an already-narrow success region — one hypothesis is this made that region harder to *find* during early exploration (versus v1.4's stack, where nothing required simultaneously satisfying an extra orientation constraint to get *any* of `stand_on_feet`'s reward), but this hasn't been tested against alternatives (lower weight, ungated, or gated on height alone) — see "Remaining" below. |
 | v1.4 remains best | — | Restated for clarity: no version after v1.4 (v1.5, v1.6, v1.7) has matched its 100% genuine-recovery checkpoint. The bent-waist posture problem v1.4 exposed is still unsolved. |
-| v1.4 rerun *(in progress)* | No code change — same v1.4 reward set (v1.5/v1.6/v1.7 all reverted), `max_iterations=20000` instead of the original 10,000 (double-length, same `num_envs=4096`) | Testing whether more training alone (not a new reward term) changes the standing posture, before trying another reward-side fix for the bent waist. Results pending. |
+| v1.4 rerun *(failed — see below)* | No code change — same v1.4 reward set (v1.5/v1.6/v1.7 all reverted), `max_iterations=20000` instead of the original 10,000 (double-length, same `num_envs=4096`) | Testing whether more training alone (not a new reward term) changes the standing posture, before trying another reward-side fix. **Result: failed, and surprisingly so.** 20,000-iteration run (W&B `yzkba46u`, ~5h03m, ~$1.95 on a rented RTX 4090): `standing_success` peaked early (iteration 1159, ~6% through, **0.51**) then plateaued at 0.03–0.09 for the remaining 94% of training (decile snapshots: 0.31@10%, 0.17@20%, 0.04@30%, 0.07@40%, 0.06@50%, 0.04@60%, 0.04@70%, 0.07@80%, 0.05@90%, **0.038@100%**) — no late recovery, despite the `reset_to_standing_curriculum` anneal completing at a *fixed* ~150,000 env-steps (~iteration 6250) regardless of total run length, meaning this run had **~4x more post-curriculum training time** than the original 10k run did before its own late recovery. `scripts/eval_fallen_recovery.py`: **0.0% genuine recovery (0/60)**, +0.017m over baseline — indistinguishable from doing nothing, the same failure signature as v1.6/v1.7. Video-confirmed (genuinely-fallen reset): robot stays sprawled, never rises, visually identical in kind to v1.6/v1.7's failure videos. **This is the same v1.4 code that produced 100% genuine recovery in `c3b1ytc6`** — the only difference is `max_iterations` and (implicitly) the random seed/training trajectory. More training did not help; if anything this run never got close. See the Status line above: this now makes `c3b1ytc6`'s success look more like a run-dependent outcome than a reliable property of the v1.4 reward design. |
 
 Takeaway pattern across v1.4→v1.6: two consecutive versions (v1.5, v1.6)
 fixed real problems they found (an unpenalized hand, then an exploit their
