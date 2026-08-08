@@ -24,8 +24,6 @@ Key design decisions:
   is a risk — the "kneeling trap" local minimum).
 """
 
-import math
-
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -358,15 +356,6 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     #   hand_supported_rise (weight 2.0) — push torso up while both hands
     #   planted; foot_advance (weight 1.5) — one foot steps forward while a
     #   hand is still down
-    # v1.7 (v1.5/v1.6 reverted, see docs/get_up_task.md version history):
-    #   upper_body_upright (weight 3.0) — reward the thorax itself vertical,
-    #   gated on stand_on_feet's own condition. v1.4 (10k iterations) stood
-    #   up but stayed bent forward at the waist, propped on a hand;
-    #   task_progress's orientation component is pelvis-frame and can't see
-    #   a waist bend above it. v1.5/v1.6 attacked the symptom (penalize the
-    #   hand, then fix the camping exploit that created) without producing a
-    #   straight standing pose, so both are reverted in favor of directly
-    #   reinforcing the actual goal.
     # Conditional style (zeroed during rising, active near standing):
     #   stand_still_pose — penalize joint deviation from default (weight -0.5)
     # Regularization:
@@ -395,20 +384,6 @@ def walka_get_up_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
             params={
                 "sensor_name": "feet_ground_contact",
                 "target_height": SUCCESS_HEIGHT,
-            },
-        ),
-        "upper_body_upright": RewardTermCfg(
-            func=mdp.upper_body_upright,
-            # Above stand_on_feet's 2.5, same reasoning v1.5's (reverted)
-            # hands_off_ground used: the reward for straightening up needs
-            # to decisively outweigh whatever balance benefit the bent,
-            # hand-propped posture was providing, not just nudge against it.
-            weight=3.0,
-            params={
-                "std": math.sqrt(0.2),  # matches the stock `upright` class's convention
-                "sensor_name": "feet_ground_contact",
-                "target_height": SUCCESS_HEIGHT,
-                "body_name": "thorax",
             },
         ),
         "shank_vertical": RewardTermCfg(

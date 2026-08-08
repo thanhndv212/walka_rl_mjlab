@@ -28,18 +28,6 @@ Key design decisions:
 - stand_still_pose: conditional penalty, zeroed during rising phase
   (the HumanUP/HoST insight: style penalties must be zeroed during
   get-up or they conflict with the task reward)
-- upper_body_upright (v1.7): v1.4 (10k iterations) reached 100% genuine
-  recovery on scripts/eval_fallen_recovery.py but video inspection showed
-  the torso bent forward at the waist once standing, propped up by a hand
-  left on the ground -- see docs/get_up_task.md's version history. v1.5/v1.6
-  tried to fix this indirectly (penalize the hand, then fix a camping
-  exploit that penalty created) and neither produced a straight standing
-  pose worth keeping, so those two versions are reverted here. This term
-  instead reinforces the actual goal directly: reward the thorax itself
-  (not the pelvis -- ``task_progress``'s orientation component is pelvis-
-  frame and can't see a waist bend above it) held vertical, gated on the
-  same both-feet-planted condition as ``stand_on_feet`` so it only pays out
-  once the get-up motion is actually finished.
 """
 
 from __future__ import annotations
@@ -298,63 +286,6 @@ def stand_on_feet(
     h = asset.data.root_link_pos_w[:, 2]
     tall_enough = h > target_height
     return (both_feet & tall_enough).float()
-
-
-class upper_body_upright(ManagerTermBase):
-    """Reward the upper body (thorax) held vertical, gated on the robot
-    genuinely standing on both feet -- same gate as ``stand_on_feet``.
-
-    v1.4 achieved standing (100% genuine recovery on
-    ``scripts/eval_fallen_recovery.py``) but video inspection showed the
-    torso stayed bent forward at the waist, propped up by a hand left on
-    the ground. ``task_progress``'s orientation component can't see this:
-    it reads ``root_link_pos_w``/root orientation, i.e. the pelvis, and the
-    pelvis can be near-vertical while ``pitch_waist_joint`` folds the
-    thorax forward above it. v1.5/v1.6 attacked the symptom instead --
-    penalize the hand that was propping up the bend, then fix a camping
-    exploit that penalty itself created -- and neither produced a straight
-    standing pose, so both are reverted (see docs/get_up_task.md's version
-    history). This term reinforces the actual goal directly: pay for the
-    thorax's own projected-gravity verticality, mirroring the stock
-    ``upright`` class's math (``mjlab.tasks.velocity.mdp.rewards.upright``)
-    but targeted at the thorax body instead of the pelvis.
-
-    Gated on ``stand_on_feet``'s own condition (both feet contact + height
-    above target), not just height alone, so this only reinforces posture
-    once the get-up motion is actually finished -- rising through a bent
-    intermediate pose (e.g. the hand-supported push-up phase) isn't
-    penalized or contradicted, consistent with the conditional-style
-    insight ``stand_still_pose`` already follows elsewhere in this file.
-    """
-
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv) -> None:
-        super().__init__(env)
-        body_name = cfg.params.get("body_name", "thorax")
-        asset = env.scene[cfg.params.get("asset_cfg", _DEFAULT_ASSET_CFG).name]
-        body_ids, _ = asset.find_bodies([body_name], preserve_order=True)
-        self._body_id = body_ids[0]
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        std: float,
-        sensor_name: str,
-        target_height: float,
-        body_name: str = "thorax",
-        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    ) -> torch.Tensor:
-        del body_name  # consumed in __init__ only
-        asset = env.scene[asset_cfg.name]
-        body_quat_w = asset.data.body_link_quat_w[:, self._body_id, :]
-        projected_gravity_b = quat_apply_inverse(body_quat_w, asset.data.gravity_vec_w)
-        xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
-        upright_reward = torch.exp(-xy_squared / std**2)
-
-        sensor: ContactSensor = env.scene.sensors[sensor_name]
-        both_feet = (sensor.data.current_contact_time > 0).all(dim=1)
-        h = asset.data.root_link_pos_w[:, 2]
-        standing = both_feet & (h > target_height)
-        return upright_reward * standing.float()
 
 
 def stand_still_pose(
